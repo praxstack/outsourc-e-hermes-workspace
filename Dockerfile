@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.6
-# Project Workspace — production Docker image
+# Hermes Workspace — production Docker image
 # Publishes to ghcr.io/outsourc-e/hermes-workspace
 #
 # Build locally:

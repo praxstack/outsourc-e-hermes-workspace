@@ -15,44 +15,46 @@ import { MobilePromptTrigger } from '@/components/mobile-prompt/MobilePromptTrig
 import { Toaster } from '@/components/ui/toast'
 import { OnboardingTour } from '@/components/onboarding/onboarding-tour'
 import { KeyboardShortcutsModal } from '@/components/keyboard-shortcuts-modal'
+import { UpdateCenterNotifier } from '@/components/update-center-notifier'
 import { initializeSettingsAppearance } from '@/hooks/use-settings'
 import { useApplyChatWidth } from '@/hooks/use-chat-settings'
 import {
-  HermesOnboarding,
+  ClaudeOnboarding,
   ONBOARDING_COMPLETE_EVENT,
   ONBOARDING_KEY,
-} from '@/components/onboarding/hermes-onboarding'
+} from '@/components/onboarding/claude-onboarding'
 import { ErrorBoundary } from '@/components/error-boundary'
+import { LoginScreen } from '@/components/auth/login-screen'
+import { fetchClaudeAuthStatus, type AuthStatus } from '@/lib/claude-auth'
 import { getRootSurfaceState } from './-root-layout-state'
-
 
 const APP_CSP = [
   "default-src 'self'",
   "base-uri 'self'",
   "object-src 'none'",
   "form-action 'self'",
-  "frame-ancestors 'none'",
-  "script-src 'self' 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline'",
+  // frame-ancestors is ignored in meta CSP and must be sent as an HTTP header.
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
   "img-src 'self' data: blob: https:",
-  "font-src 'self' data:",
+  "font-src 'self' data: https://fonts.gstatic.com",
   "connect-src 'self' ws: wss: http: https:",
   "worker-src 'self' blob:",
   "media-src 'self' blob: data:",
   "frame-src 'self' http: https:",
 ].join('; ')
 
-const THEME_STORAGE_KEY = 'hermes-theme'
-const DEFAULT_THEME = 'hermes-nous'
+const THEME_STORAGE_KEY = 'claude-theme'
+const DEFAULT_THEME = 'claude-nous'
 const VALID_THEMES = [
-  'hermes-nous',
-  'hermes-nous-light',
-  'hermes-official',
-  'hermes-official-light',
-  'hermes-classic',
-  'hermes-classic-light',
-  'hermes-slate',
-  'hermes-slate-light',
+  'claude-nous',
+  'claude-nous-light',
+  'claude-official',
+  'claude-official-light',
+  'claude-classic',
+  'claude-classic-light',
+  'claude-slate',
+  'claude-slate-light',
 ]
 
 const themeScript = `
@@ -63,7 +65,7 @@ const themeScript = `
     const root = document.documentElement
     const storedTheme = localStorage.getItem('${THEME_STORAGE_KEY}')
     const theme = ${JSON.stringify(VALID_THEMES)}.includes(storedTheme) ? storedTheme : '${DEFAULT_THEME}'
-    const lightThemes = ['hermes-nous-light', 'hermes-official-light', 'hermes-classic-light', 'hermes-slate-light']
+    const lightThemes = ['claude-nous-light', 'claude-official-light', 'claude-classic-light', 'claude-slate-light']
     const isDark = !lightThemes.includes(theme)
     root.classList.remove('light', 'dark', 'system')
     root.classList.add(isDark ? 'dark' : 'light')
@@ -86,17 +88,17 @@ const themeColorScript = `
     const root = document.documentElement
     const theme = root.getAttribute('data-theme') || '${DEFAULT_THEME}'
     const colors = {
-      'hermes-nous': '#031A1A',
-      'hermes-nous-light': '#F8FAF8',
-      'hermes-official': '#0A0E1A',
-      'hermes-official-light': '#F7F7F1',
-      'hermes-classic': '#0d0f12',
-      'hermes-classic-light': '#F5F2ED',
-      'hermes-slate': '#0d1117',
-      'hermes-slate-light': '#F6F8FA',
+      'claude-nous': '#031A1A',
+      'claude-nous-light': '#F8FAF8',
+      'claude-official': '#0A0E1A',
+      'claude-official-light': '#F7F7F1',
+      'claude-classic': '#0d0f12',
+      'claude-classic-light': '#F5F2ED',
+      'claude-slate': '#0d1117',
+      'claude-slate-light': '#F6F8FA',
     }
     const nextColor = colors[theme] || colors['${DEFAULT_THEME}']
-    const isDark = !['hermes-nous-light', 'hermes-official-light', 'hermes-classic-light', 'hermes-slate-light'].includes(String(theme))
+    const isDark = !['claude-nous-light', 'claude-official-light', 'claude-classic-light', 'claude-slate-light'].includes(String(theme))
 
     let meta = document.querySelector('meta[name="theme-color"]')
     if (!meta) {
@@ -167,7 +169,7 @@ export const Route = createRootRoute({
       {
         rel: 'icon',
         type: 'image/png',
-        href: '/hermes-avatar.png',
+        href: '/claude-avatar.png',
       },
       // PWA manifest and icons
       {
@@ -206,7 +208,9 @@ export const Route = createRootRoute({
 
 const queryClient = new QueryClient()
 
-export function getRootLayoutMode(onboardingComplete: string | null): 'onboarding' | 'workspace' {
+export function getRootLayoutMode(
+  onboardingComplete: string | null,
+): 'onboarding' | 'workspace' {
   return onboardingComplete === 'true' ? 'workspace' : 'onboarding'
 }
 
@@ -215,7 +219,11 @@ export function wrapInlineScript(source: string): string {
 }
 
 type ServiceWorkerLike = {
-  getRegistrations: () => Promise<ReadonlyArray<{ unregister: () => boolean | Promise<boolean> | void | Promise<void> }>>
+  getRegistrations: () => Promise<
+    ReadonlyArray<{
+      unregister: () => boolean | Promise<boolean> | void | Promise<void>
+    }>
+  >
 }
 
 type CachesLike = {
@@ -241,7 +249,9 @@ export async function unregisterServiceWorkers({
 
   await cachesApi
     ?.keys()
-    .then((names) => Promise.allSettled(names.map((name) => cachesApi.delete(name))))
+    .then((names) =>
+      Promise.allSettled(names.map((name) => cachesApi.delete(name))),
+    )
     .catch(() => undefined)
 }
 
@@ -249,9 +259,12 @@ function RootLayout() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(
     null,
   )
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
+  const [mounted, setMounted] = useState(false)
   useApplyChatWidth()
 
   useEffect(() => {
+    setMounted(true)
     initializeSettingsAppearance()
 
     const syncOnboardingCompletion = () => {
@@ -267,6 +280,24 @@ function RootLayout() {
     }
 
     syncOnboardingCompletion()
+
+    void fetch('/api/connection-status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then(
+        (
+          status: {
+            ok?: boolean
+            chatReady?: boolean
+            modelConfigured?: boolean
+          } | null,
+        ) => {
+          if (status?.ok || (status?.chatReady && status?.modelConfigured)) {
+            localStorage.setItem(ONBOARDING_KEY, 'true')
+            syncOnboardingCompletion()
+          }
+        },
+      )
+      .catch(() => undefined)
 
     const handleStorage = (event: StorageEvent) => {
       if (event.key && event.key !== ONBOARDING_KEY) return
@@ -284,7 +315,8 @@ function RootLayout() {
     )
 
     void unregisterServiceWorkers({
-      serviceWorker: 'serviceWorker' in navigator ? navigator.serviceWorker : undefined,
+      serviceWorker:
+        'serviceWorker' in navigator ? navigator.serviceWorker : undefined,
       cachesApi: 'caches' in window ? caches : undefined,
     })
 
@@ -297,12 +329,30 @@ function RootLayout() {
     }
   }, [])
 
-  const rootSurfaceState = getRootSurfaceState(onboardingComplete)
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    let cancelled = false
+    fetchClaudeAuthStatus()
+      .then((status) => {
+        if (!cancelled) setAuthStatus(status)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuthStatus({ authenticated: true, authRequired: false })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const rootSurfaceState = getRootSurfaceState(onboardingComplete, authStatus)
 
   return (
     <QueryClientProvider client={queryClient}>
       <Toaster />
-      {rootSurfaceState.showOnboarding ? <HermesOnboarding /> : null}
+      {mounted && rootSurfaceState.showLogin ? <LoginScreen /> : null}
+      {mounted && rootSurfaceState.showOnboarding ? <ClaudeOnboarding /> : null}
       {rootSurfaceState.showWorkspaceShell ? (
         <>
           <GlobalShortcutListener />
@@ -318,6 +368,7 @@ function RootLayout() {
           </WorkspaceShell>
           <SearchModal />
           <KeyboardShortcutsModal />
+          <UpdateCenterNotifier />
           {rootSurfaceState.showPostOnboardingOverlays ? (
             <>
               <MobilePromptTrigger />
@@ -349,10 +400,14 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         `),
           }}
         />
-        <script dangerouslySetInnerHTML={{ __html: wrapInlineScript(themeScript) }} />
+        <script
+          dangerouslySetInnerHTML={{ __html: wrapInlineScript(themeScript) }}
+        />
         <HeadContent />
         <script
-          dangerouslySetInnerHTML={{ __html: wrapInlineScript(themeColorScript) }}
+          dangerouslySetInnerHTML={{
+            __html: wrapInlineScript(themeColorScript),
+          }}
         />
       </head>
       <body>
@@ -364,37 +419,37 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             var bg = '#031A1A', txt = '#F8F1E3', muted = '#9CB2AE', accent = '#FFAC02';
             try {
               var theme = localStorage.getItem('${THEME_STORAGE_KEY}') || '${DEFAULT_THEME}';
-              if (theme === 'hermes-nous') {
+              if (theme === 'claude-nous') {
                 bg = '#031A1A';
                 txt = '#F8F1E3';
                 muted = '#9CB2AE';
                 accent = '#FFAC02';
-              } else if (theme === 'hermes-nous-light') {
+              } else if (theme === 'claude-nous-light') {
                 bg = '#F8FAF8';
                 txt = '#16315F';
                 muted = '#6F7D96';
                 accent = '#2557B7';
-              } else if (theme === 'hermes-classic') {
+              } else if (theme === 'claude-classic') {
                 bg = '#0d0f12';
                 txt = '#eceff4';
                 muted = '#7f8a96';
                 accent = '#b98a44';
-              } else if (theme === 'hermes-official-light') {
+              } else if (theme === 'claude-official-light') {
                 bg = '#F7F7F1';
                 txt = '#16315F';
                 muted = '#6F7D96';
                 accent = '#2557B7';
-              } else if (theme === 'hermes-classic-light') {
+              } else if (theme === 'claude-classic-light') {
                 bg = '#F5F2ED';
                 txt = '#1a1f26';
                 muted = '#6F675E';
                 accent = '#b98a44';
-              } else if (theme === 'hermes-slate') {
+              } else if (theme === 'claude-slate') {
                 bg = '#0d1117';
                 txt = '#c9d1d9';
                 muted = '#8b949e';
                 accent = '#7eb8f6';
-              } else if (theme === 'hermes-slate-light') {
+              } else if (theme === 'claude-slate-light') {
                 bg = '#F6F8FA';
                 txt = '#24292f';
                 muted = '#57606A';
@@ -402,15 +457,15 @@ function RootDocument({ children }: { children: React.ReactNode }) {
               }
             } catch(e){}
 
-            var isDark = !['hermes-nous-light','hermes-official-light','hermes-classic-light','hermes-slate-light'].includes(theme);
-            var quips = ["Consulting the oracle...","Loading ancient knowledge...","Warming up the messenger...","Calibrating tool chain...","Summoning Hermes...","Preparing the workspace...","Bridging realms...","Initializing agent runtime..."];
+            var isDark = !['claude-nous-light','claude-official-light','claude-classic-light','claude-slate-light'].includes(theme);
+            var quips = ["Consulting the oracle...","Loading ancient knowledge...","Warming up the messenger...","Calibrating tool chain...","Summoning your agent...","Preparing the workspace...","Bridging realms...","Initializing agent runtime..."];
             var quip = quips[Math.floor(Math.random() * quips.length)];
 
             var d = document.createElement('div');
             d.id = 'splash-screen';
             d.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:'+bg+';transition:opacity 0.5s ease;';
-            d.innerHTML = '<img src="/hermes-avatar.webp" alt="Hermes" style="width:80px;height:80px;margin-bottom:20px;border-radius:16px;filter:drop-shadow(0 8px 32px color-mix(in srgb,'+accent+' 45%, transparent))" />'
-              + '<img src="'+(isDark ? '/hermes-banner.png' : '/hermes-banner-light.png')+'" alt="Hermes Workspace" style="width:280px;height:auto;margin-bottom:8px;filter:drop-shadow(0 4px 16px '+(isDark ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.1)')+')" />'
+            d.innerHTML = '<img src="/claude-avatar.webp" alt="Hermes Agent" style="width:80px;height:80px;margin-bottom:20px;border-radius:16px;filter:drop-shadow(0 8px 32px color-mix(in srgb,'+accent+' 45%, transparent))" />'
+              + '<img src="'+(isDark ? '/claude-banner.png' : '/claude-banner-light.png')+'" alt="Hermes Workspace" style="width:280px;height:auto;margin-bottom:8px;filter:drop-shadow(0 4px 16px '+(isDark ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.1)')+')" />'
               + '<div style="font:400 14px/1 system-ui,-apple-system,sans-serif;letter-spacing:0.04em;color:'+muted+'">Workspace</div>'
               + '<div style="margin-top:28px;width:140px;height:3px;background:'+(isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)')+';border-radius:3px;overflow:hidden;position:relative"><div id=splash-bar style="width:0%;height:100%;background:'+accent+';border-radius:3px;transition:width 0.4s ease"></div></div>';
             document.body.prepend(d);
@@ -437,7 +492,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             setTimeout(function(){ window.__dismissSplash && window.__dismissSplash(); }, 5000);
             // Fast dismiss: returning users skip quickly
             try {
-              if (localStorage.getItem('hermes-hermes-url') || localStorage.getItem('hermes-url')) {
+              if (localStorage.getItem('claude-claude-url') || localStorage.getItem('claude-url')) {
                 setTimeout(function(){ window.__dismissSplash && window.__dismissSplash(); }, 600);
               }
             } catch(e) {}

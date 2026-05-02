@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChatAttachment, ChatMessage } from '../types'
+import { readResolvedSessionHeaders } from '@/lib/send-stream-session-headers'
 import { useChatStore } from '@/stores/chat-store'
 import { pushActivity } from '@/components/inspector/activity-store'
 
@@ -52,10 +53,13 @@ type UseStreamingMessageOptions = {
     friendlyId: string,
     clientId: string,
   ) => void
+  onAbort?: () => void
   onSessionResolved?: (payload: {
     sessionKey: string
     friendlyId: string
   }) => void
+  acceptedTimeoutMs?: number
+  handoffTimeoutMs?: number
 }
 
 export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
@@ -67,7 +71,10 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
     onThinking,
     onTool,
     onMessageAccepted,
+    onAbort,
     onSessionResolved,
+    acceptedTimeoutMs,
+    handoffTimeoutMs,
   } = options
 
   const [state, setState] = useState<StreamingState>({
@@ -85,7 +92,9 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
   const finishedRef = useRef(false)
   const thinkingRef = useRef<string>('')
   const activeRunIdRef = useRef<string | null>(null)
-  const delayedUnregisterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const delayedUnregisterTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null)
   const activeSessionKeyRef = useRef<string>('main')
   const lifecyclePhaseRef = useRef<StreamLifecyclePhase>('idle')
   const acceptedAtRef = useRef<number | null>(null)
@@ -98,9 +107,8 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
   const processStoreEvent = useChatStore((s) => s.processEvent)
   const clearStreamingSession = useChatStore((s) => s.clearStreamingSession)
 
-  // Hermes tool calls can take 60-120s (file reads, terminal commands, web searches)
-  const ACCEPTED_NO_ACTIVITY_TIMEOUT_MS = 120_000
-  const HANDOFF_NO_ACTIVITY_TIMEOUT_MS = 180_000
+  const ACCEPTED_NO_ACTIVITY_TIMEOUT_MS = acceptedTimeoutMs ?? 120_000
+  const HANDOFF_NO_ACTIVITY_TIMEOUT_MS = handoffTimeoutMs ?? 300_000
 
   const stopFrame = useCallback(() => {
     if (frameRef.current !== null) {
@@ -263,17 +271,24 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
   ])
 
   useEffect(
-    function cleanupStreamingOnUnmount() {
+    function keepAcceptedRunAliveOnUnmount() {
       return function cleanup() {
-        if (eventSourceRef.current) {
-          eventSourceRef.current.abort()
-          eventSourceRef.current = null
-        }
-        finishedRef.current = true
-        resetActiveStreamState()
+        if (!eventSourceRef.current || finishedRef.current) return
+
+        // Navigating away from Chat unmounts this hook. Previously this cleanup
+        // aborted /api/send-stream and reset the local stream state, which made
+        // the UI look like Hermes stopped thinking. Leave the accepted request
+        // alive instead: the server-side route deliberately keeps the upstream
+        // Hermes run alive after the browser reader is cancelled, and the
+        // persisted waiting/session state lets the screen recover from history
+        // or active-run polling when the user comes back.
+        lifecyclePhaseRef.current = 'handoff'
+        clearSendStreamRun()
+        clearHandoffTimer()
+        stopFrame()
       }
     },
-    [resetActiveStreamState],
+    [clearHandoffTimer, clearSendStreamRun, stopFrame],
   )
 
   const pushTargetText = useCallback(
@@ -378,6 +393,30 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
     (event: string, data: unknown) => {
       const payload = data as Record<string, unknown>
 
+      // [DEBUG TUI] Log every SSE event so we can see whether tool.* events arrive
+      // from Hermes Agent through Workspace. Toggle off by setting
+      // localStorage.removeItem('hermes:debug:sse')
+      if (
+        typeof window !== 'undefined' &&
+        window.localStorage?.getItem('hermes:debug:sse') === '1'
+      ) {
+        // eslint-disable-next-line no-console
+        console.log(
+          '[hermes-sse]',
+          event,
+          (payload?.name as string) || '',
+          (payload?.phase as string) || '',
+          payload,
+        )
+      }
+
+      // hb_signal/keepalive events from server: just mark activity, never let them
+      // surface as user-visible thinking or tool rows.
+      if (event === 'hb_signal' || event === 'heartbeat' || event === 'keepalive' || event === 'ping') {
+        markActivity()
+        return
+      }
+
       switch (event) {
         case 'started': {
           const resolvedSessionKey =
@@ -460,6 +499,13 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
             (payload as { text?: string; thinking?: string }).text ??
             (payload as { thinking?: string }).thinking ??
             ''
+          // Drop server-side keepalive placeholders that came in as 'thinking'
+          // before the dedicated hb_signal event existed. These are not real
+          // model thinking and would otherwise pollute the TUI activity card.
+          const isKeepalivePlaceholder =
+            typeof thinking === 'string' &&
+            /^still\s+working[\.\u2026]*\s*$/i.test(thinking.trim())
+          if (isKeepalivePlaceholder) break
           if (thinking) {
             markActivity()
             thinkingRef.current = thinking
@@ -597,9 +643,7 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
             type: 'done',
             state: doneState ?? 'final',
             errorMessage,
-            message: (payload).message as
-              | Record<string, unknown>
-              | undefined,
+            message: payload.message as Record<string, unknown> | undefined,
             runId: activeRunIdRef.current ?? undefined,
             sessionKey: activeSessionKeyRef.current,
             transport: 'send-stream',
@@ -642,6 +686,10 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
           }
           break
         }
+        case 'heartbeat': {
+          markActivity()
+          break
+        }
         case 'close': {
           if (fullTextRef.current) {
             finishStream()
@@ -652,7 +700,7 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
           ) {
             transitionToHandoff()
           } else {
-            markFailed('Hermes connection closed')
+            markFailed('Hermes Agent connection closed')
           }
           break
         }
@@ -698,7 +746,12 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
               role: 'assistant',
               content: [
                 ...(thinkingRef.current
-                  ? [{ type: 'thinking' as const, thinking: thinkingRef.current }]
+                  ? [
+                      {
+                        type: 'thinking' as const,
+                        thinking: thinkingRef.current,
+                      },
+                    ]
                   : []),
                 { type: 'text' as const, text: fullTextRef.current },
               ],
@@ -738,7 +791,10 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
             attachments: params.attachments,
             idempotencyKey: params.idempotencyKey ?? crypto.randomUUID(),
             model: params.model || undefined,
-            locale: typeof window !== 'undefined' ? localStorage.getItem('hermes-workspace-locale') || 'en' : 'en',
+            locale:
+              typeof window !== 'undefined'
+                ? localStorage.getItem('hermes-workspace-locale') || 'en'
+                : 'en',
           }),
           signal: abortController.signal,
         })
@@ -748,12 +804,12 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
           throw new Error(errorText || 'Stream request failed')
         }
 
-        const resolvedSessionKey =
-          response.headers.get('x-hermes-session-key')?.trim() ||
-          params.sessionKey
-        const resolvedFriendlyId =
-          response.headers.get('x-hermes-friendly-id')?.trim() ||
-          resolvedSessionKey
+        const resolvedHeaders = readResolvedSessionHeaders(response.headers, {
+          sessionKey: params.sessionKey,
+          friendlyId: params.friendlyId || params.sessionKey,
+        })
+        const resolvedSessionKey = resolvedHeaders.sessionKey
+        const resolvedFriendlyId = resolvedHeaders.friendlyId
         if (resolvedSessionKey !== activeSessionKeyRef.current) {
           activeSessionKeyRef.current = resolvedSessionKey
           onSessionResolved?.({
@@ -765,13 +821,13 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
         markAccepted()
         schedulePostAcceptanceTimeout('accepted')
 
-        // HTTP 200 — message accepted by Hermes. Clear optimistic "sending"
-        // status so the Retry timer never fires. Hermes does NOT echo
+        // HTTP 200 — message accepted by Hermes Agent. Clear optimistic "sending"
+        // status so the Retry timer never fires. Hermes Agent does NOT echo
         // user messages via SSE, so this is the only confirmation we get.
         if (params.idempotencyKey && onMessageAccepted) {
           onMessageAccepted(
             activeSessionKeyRef.current,
-            activeSessionKeyRef.current,
+            resolvedFriendlyId,
             params.idempotencyKey,
           )
         }
@@ -824,7 +880,17 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
           finishStream()
         }
       } catch (err) {
-        if ((err as Error).name === 'AbortError') return
+        if ((err as Error).name === 'AbortError') {
+          eventSourceRef.current = null
+          clearHandoffTimer()
+          clearSendStreamRun()
+          setState((prev) => ({
+            ...prev,
+            isStreaming: false,
+          }))
+          onAbort?.()
+          return
+        }
         const errorMessage = err instanceof Error ? err.message : String(err)
         markFailed(errorMessage)
       }
@@ -833,6 +899,7 @@ export function useStreamingMessage(options: UseStreamingMessageOptions = {}) {
       finishStream,
       markAccepted,
       markFailed,
+      onAbort,
       onMessageAccepted,
       onSessionResolved,
       processEvent,

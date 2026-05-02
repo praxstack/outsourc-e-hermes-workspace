@@ -71,14 +71,14 @@ import type {
   ChatComposerHelpers,
   ThinkingLevel,
 } from './components/chat-composer'
-import type { ApprovalRequest } from '@/lib/approvals-store'
+import type { ApprovalRequest } from '@/screens/gateway/lib/approvals-store'
 import type { ChatAttachment, ChatMessage, SessionMeta } from './types'
 import type { ChatRunCommandDetail } from './chat-events'
 import {
   addApproval,
   loadApprovals,
   saveApprovals,
-} from '@/lib/approvals-store'
+} from '@/screens/gateway/lib/approvals-store'
 import { stripQueuedWrapper } from '@/lib/strip-queued-wrapper'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toast'
@@ -516,7 +516,7 @@ export function ChatScreen({
   // Per-session thinking level — stored in sessionStorage keyed by session
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
     if (typeof window === 'undefined') return 'low'
-    const key = `hermes-thinking-${activeFriendlyId || 'new'}`
+    const key = `claude-thinking-${activeFriendlyId || 'new'}`
     const stored = window.sessionStorage.getItem(key)
     if (stored === 'off' || stored === 'low' || stored === 'adaptive')
       return stored
@@ -537,7 +537,7 @@ export function ChatScreen({
   } | null>(null)
   const [fileExplorerCollapsed, setFileExplorerCollapsed] = useState(() => {
     if (typeof window === 'undefined') return true
-    const stored = localStorage.getItem('hermes-file-explorer-collapsed')
+    const stored = localStorage.getItem('claude-file-explorer-collapsed')
     return stored === null ? true : stored === 'true'
   })
   const { isMobile } = useChatMobile(queryClient)
@@ -653,7 +653,7 @@ export function ChatScreen({
       if (
         approvalId &&
         currentApprovals.some((entry) => {
-          return entry.status === 'pending' && entry.approvalId === approvalId
+          return entry.status === 'pending' && entry.gatewayApprovalId === approvalId
         })
       ) {
         setPendingApprovals(
@@ -687,15 +687,15 @@ export function ChatScreen({
       const agentId =
         typeof agentIdValue === 'string' && agentIdValue.trim().length > 0
           ? agentIdValue
-          : 'hermes'
+          : 'claude'
 
       addApproval({
         agentId,
         agentName,
         action,
         context,
-        source: 'hermes',
-        approvalId: approvalId || undefined,
+        source: 'agent',
+        gatewayApprovalId: approvalId || undefined,
       })
       setPendingApprovals(
         loadApprovals().filter((entry) => entry.status === 'pending'),
@@ -782,12 +782,12 @@ export function ChatScreen({
       setPendingApprovals(
         nextApprovals.filter((entry) => entry.status === 'pending'),
       )
-      if (!approval.approvalId) return
+      if (!approval.gatewayApprovalId) return
 
       const endpoint =
         status === 'approved'
-          ? `/api/approvals/${approval.approvalId}/approve`
-          : `/api/approvals/${approval.approvalId}/deny`
+          ? `/api/approvals/${approval.gatewayApprovalId}/approve`
+          : `/api/approvals/${approval.gatewayApprovalId}/deny`
       try {
         await fetch(endpoint, { method: 'POST' })
       } catch {
@@ -908,7 +908,13 @@ export function ChatScreen({
         )
         if (!res.ok) return
         const data = await res.json()
-        if (!data.ok || !data.run || !['accepted', 'active', 'handoff'].includes(data.run.status)) {
+        if (!data.ok) return
+        // Run not yet registered (gateway lag during silent processing) → keep waiting
+        if (!data.run) return
+        const status = data.run.status
+        // Treat unknown / transient statuses as still-active to avoid premature teardown
+        const terminalStatuses = ['completed', 'failed', 'cancelled', 'error']
+        if (terminalStatuses.includes(status)) {
           streamFinish()
           refreshHistoryRef.current()
         }
@@ -942,7 +948,7 @@ export function ChatScreen({
   })
 
   const currentModelQuery = useQuery({
-    queryKey: ['hermes', 'session-status-model'],
+    queryKey: ['claude', 'session-status-model'],
     queryFn: async () => {
       try {
         const res = await fetch('/api/session-status')
@@ -989,7 +995,7 @@ export function ChatScreen({
       currentModel.toLowerCase().includes('4-6') ||
       currentModel.toLowerCase().includes('claude-4.6')
     if (is46) {
-      const key = `hermes-thinking-${activeFriendlyId || 'new'}`
+      const key = `claude-thinking-${activeFriendlyId || 'new'}`
       const stored =
         typeof window !== 'undefined'
           ? window.sessionStorage.getItem(key)
@@ -1006,7 +1012,7 @@ export function ChatScreen({
     (level: ThinkingLevel) => {
       setThinkingLevel(level)
       if (typeof window !== 'undefined') {
-        const key = `hermes-thinking-${activeFriendlyId || 'new'}`
+        const key = `claude-thinking-${activeFriendlyId || 'new'}`
         window.sessionStorage.setItem(key, level)
       }
     },
@@ -1157,6 +1163,14 @@ export function ChatScreen({
       },
       [queryClient],
     ),
+    onAbort: useCallback(() => {
+      activeSendRef.current = null
+      setSending(false)
+      setPendingGeneration(false)
+      setWaitingForResponse(false)
+    }, [setWaitingForResponse]),
+    acceptedTimeoutMs: modelsQuery.data?.streamAcceptedTimeoutMs,
+    handoffTimeoutMs: modelsQuery.data?.streamHandoffTimeoutMs,
   })
 
   const activeIsRealtimeStreaming = isPortableMode
@@ -1481,7 +1495,7 @@ export function ChatScreen({
   ])
 
   const statusQuery = useQuery({
-    queryKey: ['hermes', 'status'],
+    queryKey: ['claude', 'status'],
     queryFn: fetchStatus,
     retry: 2,
     retryDelay: 1000,
@@ -1501,7 +1515,7 @@ export function ChatScreen({
           }
         : statusQuery.data && !statusQuery.data.ok
           ? {
-              message: statusQuery.data.error || 'Hermes unavailable',
+              message: statusQuery.data.error || 'Hermes Agent unavailable',
               status: statusQuery.data.status,
             }
           : null
@@ -1523,9 +1537,9 @@ export function ChatScreen({
     const handleRefreshRequest = () => {
       void historyQuery.refetch()
     }
-    window.addEventListener('hermes:chat-refresh', handleRefreshRequest)
+    window.addEventListener('claude:chat-refresh', handleRefreshRequest)
     return () => {
-      window.removeEventListener('hermes:chat-refresh', handleRefreshRequest)
+      window.removeEventListener('claude:chat-refresh', handleRefreshRequest)
     }
   }, [historyQuery])
 
@@ -1556,9 +1570,9 @@ export function ChatScreen({
     function handleSSEDrop() {
       void historyQuery.refetch()
     }
-    window.addEventListener('hermes:sse-dropped', handleSSEDrop)
+    window.addEventListener('claude:sse-dropped', handleSSEDrop)
     return () => {
-      window.removeEventListener('hermes:sse-dropped', handleSSEDrop)
+      window.removeEventListener('claude:sse-dropped', handleSSEDrop)
     }
   }, [historyQuery])
 
@@ -1628,7 +1642,7 @@ export function ChatScreen({
       : historyError
         ? `Failed to load history. ${historyError}`
         : statusError
-          ? `Hermes unavailable. ${statusError.message}`
+          ? `Hermes Agent unavailable. ${statusError.message}`
           : null
     if (message) setError(message)
   }, [
@@ -2054,7 +2068,7 @@ export function ChatScreen({
 
   useEffect(() => {
     if (false) {
-      // Server connection checks removed — Hermes uses direct API
+      // Server connection checks removed — Hermes Agent uses direct API
       hasSeenDisconnectRef.current = true
       retriedQueuedMessageKeysRef.current.clear()
       return
@@ -2088,9 +2102,9 @@ export function ChatScreen({
       handleRefetch()
     }
 
-    window.addEventListener('hermes:health-restored', handleHealthRestored)
+    window.addEventListener('claude:health-restored', handleHealthRestored)
     return () => {
-      window.removeEventListener('hermes:health-restored', handleHealthRestored)
+      window.removeEventListener('claude:health-restored', handleHealthRestored)
     }
   }, [flushRetryableMessages, handleRefetch])
 
@@ -2214,7 +2228,7 @@ export function ChatScreen({
         window.dispatchEvent(
           new CustomEvent(CHAT_OPEN_SETTINGS_EVENT, {
             detail: {
-              section: trimmedCommand === '/skin' ? 'appearance' : 'hermes',
+              section: trimmedCommand === '/skin' ? 'appearance' : 'claude',
             },
           }),
         )
@@ -2426,7 +2440,7 @@ export function ChatScreen({
     setFileExplorerCollapsed((prev) => {
       const next = !prev
       if (typeof window !== 'undefined') {
-        localStorage.setItem('hermes-file-explorer-collapsed', String(next))
+        localStorage.setItem('claude-file-explorer-collapsed', String(next))
       }
       return next
     })
@@ -2529,9 +2543,9 @@ export function ChatScreen({
     const handler = () => {
       /* agent view removed */
     }
-    window.addEventListener('hermes:chat-agent-details', handler)
+    window.addEventListener('claude:chat-agent-details', handler)
     return () =>
-      window.removeEventListener('hermes:chat-agent-details', handler)
+      window.removeEventListener('claude:chat-agent-details', handler)
   }, [])
 
   return (

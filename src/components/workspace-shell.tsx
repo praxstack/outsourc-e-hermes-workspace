@@ -11,16 +11,21 @@
  * Chat routes get the full ChatScreen treatment.
  * Non-chat routes show the sub-page content.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
-import { Suspense, lazy } from 'react'
-import type { SessionMeta } from '@/screens/chat/types'
-import type { AuthStatus } from '@/lib/hermes-auth'
+import type { AuthStatus } from '@/lib/claude-auth'
 import { cn } from '@/lib/utils'
 import { ConnectionStartupScreen } from '@/components/connection-startup-screen'
 import { ChatSidebar } from '@/screens/chat/components/chat-sidebar'
-import { chatQueryKeys } from '@/screens/chat/chat-queries'
+import { useChatSessions } from '@/screens/chat/hooks/use-chat-sessions'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { SIDEBAR_TOGGLE_EVENT } from '@/hooks/use-global-shortcuts'
 import { useSwipeNavigation } from '@/hooks/use-swipe-navigation'
@@ -32,7 +37,7 @@ import { MobileHamburgerMenu } from '@/components/mobile-hamburger-menu'
 import { MobilePageHeader } from '@/components/mobile-page-header'
 
 import { MobileTerminalInput } from '@/components/terminal/mobile-terminal-input'
-import { HermesReconnectBanner } from '@/components/hermes-reconnect-banner'
+import { ClaudeReconnectBanner } from '@/components/claude-reconnect-banner'
 import { useMobileKeyboard } from '@/hooks/use-mobile-keyboard'
 // System metrics footer removed — not used in Hermes Workspace
 import { CommandPalette } from '@/components/command-palette'
@@ -45,20 +50,8 @@ const TerminalWorkspace = lazy(() =>
   })),
 )
 
-type SessionsListResponse = Array<SessionMeta>
 export const DESKTOP_SIDEBAR_BACKDROP_CLASS =
   'fixed left-0 bottom-0 top-[var(--titlebar-h,0px)] w-[300px] z-10 bg-black/10 backdrop-blur-[1px]'
-
-async function fetchSessions(): Promise<SessionsListResponse> {
-  const res = await fetch('/api/sessions')
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = await res.json()
-  return Array.isArray(data?.sessions)
-    ? data.sessions
-    : Array.isArray(data)
-      ? data
-      : []
-}
 
 type WorkspaceShellProps = {
   children?: React.ReactNode
@@ -102,12 +95,11 @@ export function WorkspaceShell({ children }: WorkspaceShellProps) {
     if (path.startsWith('/files')) return 2
     if (path.startsWith('/terminal')) return 3
     if (path.startsWith('/jobs')) return 4
-    if (path.startsWith('/conductor')) return 5
-    if (path.startsWith('/operations')) return 6
-    if (path.startsWith('/memory')) return 7
-    if (path.startsWith('/skills')) return 8
-    if (path.startsWith('/profiles')) return 9
-    if (path.startsWith('/settings')) return 10
+    if (path === '/swarm' || path.startsWith('/swarm2')) return 5
+    if (path.startsWith('/memory')) return 6
+    if (path.startsWith('/skills')) return 7
+    if (path.startsWith('/profiles')) return 8
+    if (path.startsWith('/settings')) return 9
     return -1
   }, [])
 
@@ -135,6 +127,7 @@ export function WorkspaceShell({ children }: WorkspaceShellProps) {
     if (pathname.startsWith('/jobs')) return 'Jobs'
     if (pathname.startsWith('/conductor')) return 'Conductor'
     if (pathname.startsWith('/operations')) return 'Operations'
+    if (pathname.startsWith('/swarm2') || pathname === '/swarm') return 'Swarm'
     if (pathname.startsWith('/memory')) return 'Memory'
     if (pathname.startsWith('/skills')) return 'Skills'
     if (pathname.startsWith('/profiles')) return 'Profiles'
@@ -152,26 +145,19 @@ export function WorkspaceShell({ children }: WorkspaceShellProps) {
   const showDesktopSidebarBackdrop =
     !isMobile && !isOnChatRoute && !sidebarCollapsed
 
-  // Sessions query — shared across sidebar and chat
-  const sessionsQuery = useQuery({
-    queryKey: chatQueryKeys.sessions,
-    queryFn: fetchSessions,
-    refetchInterval: 15_000,
-    staleTime: 10_000,
+  const isNewChat = activeFriendlyId === 'new'
+
+  // Sessions state — shared semantic source for sidebar and chat header
+  const {
+    sessions,
+    sessionsLoading,
+    sessionsFetching,
+    sessionsError,
+    refetchSessions,
+  } = useChatSessions({
+    activeFriendlyId,
+    isNewChat,
   })
-
-  const sessions = sessionsQuery.data ?? []
-  const sessionsLoading = sessionsQuery.isLoading
-  const sessionsFetching = sessionsQuery.isFetching
-  const sessionsError = sessionsQuery.isError
-    ? sessionsQuery.error instanceof Error
-      ? sessionsQuery.error.message
-      : 'Failed to load sessions'
-    : null
-
-  const refetchSessions = useCallback(() => {
-    void sessionsQuery.refetch()
-  }, [sessionsQuery])
 
   const startNewChat = useCallback(() => {
     setCreatingSession(true)
@@ -268,7 +254,7 @@ export function WorkspaceShell({ children }: WorkspaceShellProps) {
         className="relative overflow-hidden theme-bg theme-text"
         style={shellStyle}
       >
-        <HermesReconnectBanner enabled={authState.checked} />
+        <ClaudeReconnectBanner enabled={authState.checked} />
         {/* Electron: native-style title bar (absolute over the padding) */}
         {isElectron && (
           <div

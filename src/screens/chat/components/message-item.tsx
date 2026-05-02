@@ -25,6 +25,11 @@ import {
   useChatSettingsStore,
 } from '@/hooks/use-chat-settings'
 import { cn } from '@/lib/utils'
+import {
+  buildHermesActivitySummary,
+  shouldAutoExpandHermesActivityCard,
+} from './streaming-activity-ui'
+import { TuiActivityCard } from './tui-activity-card'
 
 const WORDS_PER_TICK = 4
 const TICK_INTERVAL_MS = 50
@@ -158,6 +163,10 @@ export type InlineRenderPlanItem =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; section: InlineToolSection }
 
+export type CompactInlineRenderPlanItem =
+  | { kind: 'text'; text: string }
+  | { kind: 'tools'; sections: Array<InlineToolSection> }
+
 export function buildInlineToolRenderPlan(
   message: ChatMessage,
   toolSections: Array<InlineToolSection>,
@@ -192,12 +201,40 @@ export function buildInlineToolRenderPlan(
     }
   }
 
-  const trailingSections = toolSections.filter((section) => !usedKeys.has(section.key))
+  const trailingSections = toolSections.filter(
+    (section) => !usedKeys.has(section.key),
+  )
   for (const section of trailingSections) {
     plan.push({ kind: 'tool', section })
   }
 
   return plan
+}
+
+export function compactInlineToolRenderPlan(
+  plan: Array<InlineRenderPlanItem>,
+): Array<CompactInlineRenderPlanItem> {
+  const compactPlan: Array<CompactInlineRenderPlanItem> = []
+  let pendingToolSections: Array<InlineToolSection> = []
+
+  const flushTools = () => {
+    if (pendingToolSections.length === 0) return
+    compactPlan.push({ kind: 'tools', sections: pendingToolSections })
+    pendingToolSections = []
+  }
+
+  for (const item of plan) {
+    if (item.kind === 'tool') {
+      pendingToolSections.push(item.section)
+      continue
+    }
+
+    flushTools()
+    compactPlan.push(item)
+  }
+
+  flushTools()
+  return compactPlan
 }
 
 function extractToolResultText(msg: ChatMessage | undefined): string {
@@ -350,6 +387,43 @@ function normalizeStreamToolPhase(
     return 'error'
   }
   return 'running'
+}
+
+export type AssistantCorruptionWarning = {
+  kind: 'role-prefix' | 'divider-loop'
+  label: string
+  detail: string
+}
+
+export function detectAssistantCorruptionWarning(
+  role: string,
+  text: string,
+): AssistantCorruptionWarning | null {
+  if (role !== 'assistant') return null
+  const trimmed = text.trimStart()
+  const roleMatch = /^(user|assistant|system)\s*(?:\n|:)/i.exec(trimmed)
+  if (roleMatch) {
+    return {
+      kind: 'role-prefix',
+      label: 'Assistant output contains raw transcript role text',
+      detail: `Stored role is assistant, but the content begins with "${roleMatch[1]}". Treat this as generated text, not a real ${roleMatch[1]} turn.`,
+    }
+  }
+
+  if (text.length > 20_000) {
+    const dividerMatches =
+      text.match(/(?:^|\n)\s*(?:[-_=*]{8,}|[─━]{8,})\s*(?=\n|$)/g) ?? []
+    if (dividerMatches.length >= 20) {
+      return {
+        kind: 'divider-loop',
+        label: 'Assistant output looks corrupted',
+        detail:
+          'This very large assistant message contains repeated divider-like lines and may be a generation loop.',
+      }
+    }
+  }
+
+  return null
 }
 
 function readExecNotification(message: ChatMessage): ExecNotification | null {
@@ -1072,19 +1146,19 @@ function LifecycleEventCard({
 }) {
   return (
     <div
-      className="rounded-lg border px-3 py-1.5 text-[11px]"
+      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[11px]"
       style={{
-        background: 'var(--theme-card2)',
-        borderColor: isError
-          ? 'color-mix(in srgb, var(--theme-danger) 45%, var(--theme-border))'
-          : 'var(--theme-border)',
+        background: 'color-mix(in srgb, var(--theme-card2) 70%, transparent)',
+        borderLeft: `2px solid ${
+          isError
+            ? 'color-mix(in srgb, var(--theme-danger) 60%, var(--theme-border))'
+            : 'color-mix(in srgb, var(--theme-accent) 45%, var(--theme-border))'
+        }`,
         color: 'var(--theme-muted)',
       }}
     >
-      <span className="inline-flex items-center gap-1.5">
-        {emoji ? <span className="leading-none">{emoji}</span> : null}
-        <span>{text}</span>
-      </span>
+      {emoji ? <span className="leading-none opacity-80">{emoji}</span> : null}
+      <span className="truncate">{text}</span>
     </div>
   )
 }
@@ -1375,12 +1449,6 @@ function InlineToolSectionItem({
     const id = window.setInterval(() => setElapsed((s) => s + 1), 1000)
     return () => window.clearInterval(id)
   }, [isRunning, toolSection.key])
-  const [dots, setDots] = useState(0)
-  useEffect(() => {
-    if (!isRunning) return
-    const id = window.setInterval(() => setDots((d) => (d + 1) % 4), 400)
-    return () => window.clearInterval(id)
-  }, [isRunning, toolSection.key])
   const elapsedLabel =
     elapsed >= 60
       ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
@@ -1404,71 +1472,62 @@ function InlineToolSectionItem({
   const hasInputData =
     toolSection.input && Object.keys(toolSection.input).length > 0
   const hasOutputData = !!(toolSection.outputText || toolSection.errorText)
-  // Always expandable — show args, output, or at minimum the tool name/state
-  const hasExpandableContent = true
 
   return (
     <div>
-      {/* ── Card — always clickable to expand ── */}
       <div
         className={cn(
-          'rounded-xl border border-primary-200 bg-primary-50 text-[12px] overflow-hidden',
-          'cursor-pointer hover:border-primary-300 hover:shadow-md transition-all',
-          'shadow-sm',
+          'overflow-hidden rounded-lg border text-[12px] transition-all',
+          'cursor-pointer hover:border-[var(--theme-accent)]/40',
         )}
         style={{
-          borderLeftWidth: '4px',
-          borderLeftColor: isRunning
-            ? '#6366f1'
-            : isDone
-              ? '#22c55e'
-              : '#ef4444',
-          boxShadow: isRunning ? '0 2px 12px rgba(99,102,241,0.15)' : undefined,
+          background: 'color-mix(in srgb, var(--theme-card2) 76%, transparent)',
+          borderColor: 'var(--theme-border)',
+          boxShadow: isRunning ? '0 0 0 1px color-mix(in srgb, var(--theme-accent) 18%, transparent)' : undefined,
         }}
         onClick={() => setOpen((v) => !v)}
         role="button"
         tabIndex={0}
       >
         <div className="flex items-center gap-2 px-3 py-2">
-          <span className="text-base leading-none shrink-0">{icon}</span>
-          <span className="font-mono font-semibold text-ink text-[13px]">
+          <span className="text-sm leading-none shrink-0 opacity-80">{icon}</span>
+          <span className="font-medium text-[12px] text-[var(--theme-text)]">
             {toolDisplayLabel}
           </span>
           {previewLabel && previewLabel !== toolDisplayLabel ? (
-            <span className="truncate opacity-40 text-[10px] font-mono min-w-0">
+            <span className="truncate text-[10px] min-w-0 text-[var(--theme-muted)]">
               {previewLabel}
             </span>
           ) : null}
           <span className="flex-1" />
           {isRunning && (
-            <span className="text-[10px] tabular-nums text-primary-400">
+            <span className="text-[10px] tabular-nums text-[var(--theme-muted)]">
               {elapsedLabel}
             </span>
           )}
-          {isDone && !isRunning && (
-            <span className="text-xs text-green-500">✅</span>
-          )}
-          {isError && <span className="text-xs text-red-500">❌</span>}
+          <span
+            className={cn(
+              'rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em]',
+              isRunning
+                ? 'bg-[var(--theme-accent-soft)] text-[var(--theme-accent-strong)]'
+                : isDone
+                  ? 'bg-emerald-500/10 text-emerald-600'
+                  : 'bg-red-500/10 text-red-500',
+            )}
+          >
+            {isRunning ? 'Running' : isDone ? 'Done' : 'Error'}
+          </span>
           {isRunning && (
-            <span className="size-1.5 rounded-full animate-pulse bg-indigo-500" />
+            <span className="size-1.5 rounded-full animate-pulse bg-[var(--theme-accent)]" />
           )}
-          {hasExpandableContent && (
-            <span className="text-[8px] opacity-30 ml-0.5">
-              {open ? '▾' : '▸'}
-            </span>
-          )}
+          <span className="text-[8px] opacity-30 ml-0.5">
+            {open ? '▾' : '▸'}
+          </span>
         </div>
-        {isRunning && (
-          <div className="px-2.5 pb-1.5 text-[10px] text-primary-400">
-            {verb}
-            {'.'.repeat(dots)}
-          </div>
-        )}
       </div>
 
-      {/* ── Expanded detail — terminal-style args + output ── */}
       {open && (
-        <div className="mt-1 ml-3 flex flex-col gap-1.5 pb-1 border-l-2 border-primary-200/40 pl-3 animate-in slide-in-from-top-1 duration-150">
+        <div className="mt-1 ml-3 flex flex-col gap-1.5 border-l border-[var(--theme-border)]/70 pb-1 pl-3 animate-in slide-in-from-top-1 duration-150">
           {hasInputData && !showRawJson ? (
             <div>
               <div className="text-[9px] uppercase tracking-widest text-primary-500 mb-0.5 font-sans">
@@ -1577,11 +1636,81 @@ function InlineToolSectionItem({
 function ToolCallGroup({
   toolSections,
   expandAll,
+  isStreaming,
 }: {
   toolSections: Array<InlineToolSection>
   expandAll?: boolean
   isStreaming?: boolean
 }) {
+  const shouldAutoOpen = shouldAutoExpandHermesActivityCard({
+    isStreaming: Boolean(isStreaming),
+    toolCount: toolSections.length,
+  })
+  const [open, setOpen] = useState(Boolean(expandAll) || shouldAutoOpen)
+  useEffect(() => {
+    if (expandAll || shouldAutoOpen) setOpen(true)
+  }, [expandAll, shouldAutoOpen])
+
+  const summary = buildHermesActivitySummary(toolSections)
+
+  if (toolSections.length > 1 || isStreaming) {
+    return (
+      <div className="my-2 w-full max-w-[min(100%,700px)] overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--theme-border)_88%,transparent)] bg-[color-mix(in_srgb,var(--theme-card2)_96%,var(--theme-bg)_4%)]">
+        <button
+          type="button"
+          className="flex w-full items-start gap-3 px-3 py-2 text-left text-[12px]"
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span className="mt-0.5 font-mono text-[12px] leading-none text-[var(--theme-accent)]/85">
+            ┊
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--theme-muted)]">
+                Tool calls
+              </span>
+              <span className="rounded-md border border-[var(--theme-border)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-[var(--theme-muted)]">
+                {summary.countLabel}
+              </span>
+              <span
+                className={cn(
+                  'rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.08em]',
+                  summary.errorCount > 0
+                    ? 'bg-red-500/8 text-red-500'
+                    : summary.runningCount > 0 || isStreaming
+                      ? 'bg-[var(--theme-accent-soft)] text-[var(--theme-accent-strong)]'
+                      : 'bg-emerald-500/8 text-emerald-600',
+                )}
+              >
+                {summary.statusLabel}
+              </span>
+              <span className="ml-auto shrink-0 font-mono text-[10px] opacity-45">
+                {open ? '▾' : '▸'}
+              </span>
+            </div>
+            <div className="mt-1 truncate font-mono text-[11px] text-[var(--theme-text)]/76">
+              {summary.collapsedLabel}
+            </div>
+          </div>
+        </button>
+        {open && (
+          <div className="border-t border-[color-mix(in_srgb,var(--theme-border)_82%,transparent)] px-3 pb-2.5 pt-2">
+            <div className="flex flex-col gap-1.5">
+              {toolSections.map((toolSection, index) => (
+                <InlineToolSectionItem
+                  key={toolSection.key || `${toolSection.type}-${index}`}
+                  toolSection={toolSection}
+                  index={index}
+                  forceOpen={expandAll}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-2.5 my-3 w-full max-w-[min(100%,700px)]">
       {toolSections.map((toolSection, index) => (
@@ -1694,18 +1823,23 @@ function MessageItemComponent({
   }, [])
 
   // Simulate streaming is only active while words are still being revealed
-  const totalWords = countWords(displayText)
-  const revealComplete = revealedWordCount >= totalWords && totalWords > 0
+  const displayWordCount = countWords(displayText)
+  const revealComplete =
+    revealedWordCount >= displayWordCount && displayWordCount > 0
   const effectiveIsStreaming =
     remoteStreamingActive || (_simulateStreaming && !revealComplete)
   const assistantDisplayText = effectiveIsStreaming ? revealedText : displayText
+  const assistantCorruptionWarning = useMemo(
+    () => detectAssistantCorruptionWarning(role, assistantDisplayText),
+    [role, assistantDisplayText],
+  )
   const standaloneMarkdownDocument = useMemo(
     () => extractStandaloneMarkdownFence(assistantDisplayText),
     [assistantDisplayText],
   )
 
   useEffect(() => {
-    const totalWords = countWords(displayText)
+    const nextTotalWords = countWords(displayText)
     const previousText = previousTextRef.current
     const previousLength = previousTextLengthRef.current
     const textGrew =
@@ -1713,7 +1847,7 @@ function MessageItemComponent({
       displayText.startsWith(previousText)
     const textChanged = displayText !== previousText
 
-    targetWordCountRef.current = totalWords
+    targetWordCountRef.current = nextTotalWords
     previousTextRef.current = displayText
     previousTextLengthRef.current = displayText.length
 
@@ -1722,12 +1856,12 @@ function MessageItemComponent({
         window.clearInterval(revealTimerRef.current)
         revealTimerRef.current = null
       }
-      setRevealedWordCount(totalWords)
+      setRevealedWordCount(nextTotalWords)
       return
     }
 
     if (textChanged && !textGrew) {
-      setRevealedWordCount(totalWords)
+      setRevealedWordCount(nextTotalWords)
       return
     }
 
@@ -1736,25 +1870,25 @@ function MessageItemComponent({
     }
 
     // Don't start animation if already fully revealed
-    setRevealedWordCount((currentWordCount) => {
-      if (currentWordCount >= totalWords) {
-        return currentWordCount
+    setRevealedWordCount((wordCount) => {
+      if (wordCount >= nextTotalWords) {
+        return wordCount
       }
 
       function tick() {
-        setRevealedWordCount((currentWordCount) => {
+        setRevealedWordCount((visibleWordCount) => {
           const targetWordCount = targetWordCountRef.current
-          if (currentWordCount >= targetWordCount) {
+          if (visibleWordCount >= targetWordCount) {
             if (revealTimerRef.current !== null) {
               window.clearInterval(revealTimerRef.current)
               revealTimerRef.current = null
             }
-            return currentWordCount
+            return visibleWordCount
           }
 
           const nextWordCount = Math.min(
             targetWordCount,
-            currentWordCount + WORDS_PER_TICK,
+            visibleWordCount + WORDS_PER_TICK,
           )
 
           if (
@@ -1770,7 +1904,7 @@ function MessageItemComponent({
       }
 
       revealTimerRef.current = window.setInterval(tick, TICK_INTERVAL_MS)
-      return currentWordCount
+      return wordCount
     })
   }, [displayText, effectiveIsStreaming])
 
@@ -1997,6 +2131,10 @@ function MessageItemComponent({
     () => buildInlineToolRenderPlan(message, finalToolSections),
     [message, finalToolSections],
   )
+  const compactInlineRenderPlan = useMemo(
+    () => compactInlineToolRenderPlan(inlineRenderPlan),
+    [inlineRenderPlan],
+  )
   const hasToolCalls = finalToolSections.length > 0
   const shouldRenderMessageBubble =
     hasText ||
@@ -2109,57 +2247,27 @@ function MessageItemComponent({
         !isUser && isNew && 'animate-[message-fade-in_0.4s_ease-out]',
       )}
     >
-      {/* Bridge gap: thinking done but first text token not yet arrived (no tool calls active) */}
-      {effectiveIsStreaming && !thinking && !hasText && !hasStreamToolCalls && (
-        <div className="flex items-center gap-1.5 px-1 py-1">
-          <span className="size-1.5 animate-bounce rounded-full bg-primary-400 [animation-delay:0ms]" />
-          <span className="size-1.5 animate-bounce rounded-full bg-primary-400 [animation-delay:150ms]" />
-          <span className="size-1.5 animate-bounce rounded-full bg-primary-400 [animation-delay:300ms]" />
+      {/* Grouped tool card above the assistant bubble. Only show once there
+          is real assistant text in the bubble. While streaming with no text,
+          the legacy ThinkingBubble in chat-message-list owns the visual and
+          renders its own branched TuiActivityCard so we don't double up. */}
+      {!isUser &&
+      finalToolSections.length > 0 &&
+      (hasText || !effectiveIsStreaming) ? (
+        <div className="w-full max-w-[var(--chat-content-max-width)] flex">
+          <div className="w-6 shrink-0" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <TuiActivityCard
+              toolSections={finalToolSections}
+              thinking={null}
+              isStreaming={effectiveIsStreaming}
+              expandAll={expandAllToolSections}
+              formatLabel={formatToolDisplayLabel}
+              formatArg={keyArgLabel}
+            />
+          </div>
         </div>
-      )}
-
-      {thinking && !hasText && !hasStreamToolCalls && (
-        <div className="w-full max-w-[var(--chat-content-max-width)]">
-          <Collapsible defaultOpen={false}>
-            <CollapsibleTrigger className="w-fit">
-              <HugeiconsIcon
-                icon={Idea01Icon}
-                size={20}
-                strokeWidth={1.5}
-                className="opacity-70"
-              />
-              <span>{thinkingStatusLabel}</span>
-              {thinkingElapsedSeconds > 0 ? (
-                <span className="text-xs tabular-nums text-primary-400">
-                  {thinkingElapsedSeconds >= 60
-                    ? `${Math.floor(thinkingElapsedSeconds / 60)}m ${thinkingElapsedSeconds % 60}s`
-                    : `${thinkingElapsedSeconds}s`}
-                </span>
-              ) : null}
-              {effectiveIsStreaming ? (
-                <span className="flex items-center gap-1">
-                  <span className="size-1.5 animate-bounce rounded-full bg-primary-400 [animation-delay:0ms]" />
-                  <span className="size-1.5 animate-bounce rounded-full bg-primary-400 [animation-delay:150ms]" />
-                  <span className="size-1.5 animate-bounce rounded-full bg-primary-400 [animation-delay:300ms]" />
-                </span>
-              ) : null}
-              <HugeiconsIcon
-                icon={ArrowDown01Icon}
-                size={20}
-                strokeWidth={1.5}
-                className="opacity-60 transition-transform duration-150 group-data-panel-open:rotate-180"
-              />
-            </CollapsibleTrigger>
-            <CollapsiblePanel>
-              <div className="rounded-md border border-primary-200 bg-primary-50 p-3">
-                <p className="text-sm text-primary-700 whitespace-pre-wrap text-pretty">
-                  {thinking}
-                </p>
-              </div>
-            </CollapsiblePanel>
-          </Collapsible>
-        </div>
-      )}
+      ) : null}
       {effectiveIsStreaming && hasLifecycleEvents && !hasToolCalls && (
         <div className="w-full max-w-[var(--chat-content-max-width)] flex flex-col gap-1">
           {effectiveLifecycleEvents.map((event, index) => (
@@ -2320,47 +2428,28 @@ function MessageItemComponent({
                 ))}
               </div>
             )}
-            {!isUser && hasToolCalls && (
-              <div className="flex flex-col gap-2">
-                {inlineRenderPlan.map((item, index) =>
-                  item.kind === 'tool' ? (
-                    <ToolCallGroup
-                      key={item.section.key || `tool-${index}`}
-                      toolSections={[item.section]}
-                      expandAll={expandAllToolSections}
-                      isStreaming={effectiveIsStreaming}
-                    />
-                  ) : item.text.trim().length > 0 ? (
-                    <div key={`text-${index}`} className="relative">
-                      {extractStandaloneMarkdownFence(item.text) ? (
-                        <MarkdownMessageCard content={extractStandaloneMarkdownFence(item.text)!} />
-                      ) : (
-                        <MessageContent
-                          markdown
-                          className={cn(
-                            'text-primary-900 bg-transparent w-full text-pretty transition-all duration-100',
-                            effectiveIsStreaming && 'chat-streaming-content',
-                          )}
-                          style={
-                            isUser
-                              ? { color: 'var(--chat-user-foreground)' }
-                              : undefined
-                          }
-                        >
-                          {item.text}
-                        </MessageContent>
-                      )}
-                    </div>
-                  ) : null,
-                )}
-              </div>
-            )}
             {hasText &&
-              !(!isUser && hasToolCalls) &&
               (isUser ? (
                 <span className="text-pretty">{displayText}</span>
               ) : hasRevealedText ? (
                 <div className="relative">
+                  {assistantCorruptionWarning ? (
+                    <div
+                      className="mb-3 rounded-xl border px-3 py-2 text-xs"
+                      style={{
+                        borderColor: 'rgba(245, 158, 11, 0.45)',
+                        background: 'rgba(245, 158, 11, 0.12)',
+                        color: 'var(--chat-assistant-foreground)',
+                      }}
+                    >
+                      <div className="font-semibold">
+                        {assistantCorruptionWarning.label}
+                      </div>
+                      <div className="mt-1 opacity-80">
+                        {assistantCorruptionWarning.detail}
+                      </div>
+                    </div>
+                  ) : null}
                   {standaloneMarkdownDocument ? (
                     <MarkdownMessageCard content={standaloneMarkdownDocument} />
                   ) : (
@@ -2370,11 +2459,6 @@ function MessageItemComponent({
                         'text-primary-900 bg-transparent w-full text-pretty transition-all duration-100',
                         effectiveIsStreaming && 'chat-streaming-content',
                       )}
-                      style={
-                        isUser
-                          ? { color: 'var(--chat-user-foreground)' }
-                          : undefined
-                      }
                     >
                       {assistantDisplayText}
                     </MessageContent>
@@ -2388,7 +2472,10 @@ function MessageItemComponent({
             {isUser && isQueued && (
               <span
                 className="self-end text-[10px]"
-                style={{ color: 'color-mix(in srgb, var(--chat-user-foreground) 60%, transparent)' }}
+                style={{
+                  color:
+                    'color-mix(in srgb, var(--chat-user-foreground) 60%, transparent)',
+                }}
               >
                 Sent
               </span>
@@ -2396,19 +2483,7 @@ function MessageItemComponent({
           </div>
         </Message>
       )}
-      {/* Fallback working indicator when streaming with no text and no tool calls */}
-      {effectiveIsStreaming && !hasRevealedText && !hasStreamToolCalls ? (
-        <div
-          className="flex items-center gap-2 pl-1 text-xs"
-          style={{ color: 'var(--theme-muted)' }}
-        >
-          <span
-            className="size-1.5 rounded-full animate-pulse"
-            style={{ background: 'var(--theme-accent)' }}
-          />
-          <span>Working&hellip;</span>
-        </div>
-      ) : null}
+      {/* Bottom thinking bubble handles empty streaming states; avoid duplicate in-thread working copy. */}
       {hasAssistantMetadata ? (
         <div className="flex flex-wrap justify-end gap-x-2 gap-y-0.5 pl-10 pr-1 mt-0.5 font-mono text-[10px] tabular-nums text-primary-400 leading-relaxed">
           {usageMetadata.inputTokens !== null && (

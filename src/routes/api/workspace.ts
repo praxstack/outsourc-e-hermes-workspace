@@ -45,22 +45,22 @@ async function detectWorkspace(savedPath?: string): Promise<{
 
   // Priority 2: Environment variable
   const envWorkspace =
-    process.env.HERMES_WORKSPACE_DIR?.trim() ||
-    process.env.HERMES_WORKSPACE_DIR?.trim()
+    process.env.CLAUDE_WORKSPACE_DIR?.trim() ||
+    process.env.CLAUDE_WORKSPACE_DIR?.trim()
   if (envWorkspace) {
     const isValid = await isValidDirectory(envWorkspace)
     if (isValid) {
       return {
         path: envWorkspace,
         folderName: extractFolderName(envWorkspace),
-        source: 'hermes',
+        source: 'claude',
         isValid: true,
       }
     }
   }
 
-  // Priority 3: Default Hermes workspace path
-  const defaultPath = process.env.HERMES_HOME ?? path.join(os.homedir(), '.hermes')
+  // Priority 3: Default Claude workspace path
+  const defaultPath = process.env.HERMES_HOME ?? process.env.CLAUDE_HOME ?? path.join(os.homedir(), '.hermes')
   const defaultValid = await isValidDirectory(defaultPath)
   if (defaultValid) {
     return {
@@ -71,13 +71,13 @@ async function detectWorkspace(savedPath?: string): Promise<{
     }
   }
 
-  // Priority 4: Hermes home directory
-  const hermesDir = process.env.HERMES_HOME ?? path.join(os.homedir(), '.hermes')
-  const hermesDirValid = await isValidDirectory(hermesDir)
-  if (hermesDirValid) {
+  // Priority 4: Claude home directory
+  const claudeDir = process.env.HERMES_HOME ?? process.env.CLAUDE_HOME ?? path.join(os.homedir(), '.hermes')
+  const claudeDirValid = await isValidDirectory(claudeDir)
+  if (claudeDirValid) {
     return {
-      path: hermesDir,
-      folderName: path.basename(hermesDir),
+      path: claudeDir,
+      folderName: path.basename(claudeDir),
       source: 'default',
       isValid: true,
     }

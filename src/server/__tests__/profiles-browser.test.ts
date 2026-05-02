@@ -38,6 +38,7 @@ vi.mock('node:os', () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   delete process.env.HERMES_HOME
+  delete process.env.CLAUDE_HOME
 })
 
 async function loadMod() {
@@ -58,7 +59,7 @@ describe('profiles-browser', () => {
       const mod = await loadMod()
       mod.setActiveProfile('jarvis')
       expect(warnSpy).toHaveBeenCalledTimes(1)
-      expect(warnSpy.mock.calls[0][0]).toContain('Restart the Hermes gateway')
+      expect(warnSpy.mock.calls[0][0]).toContain('Restart the Hermes Agent gateway')
 
       warnSpy.mockRestore()
     })

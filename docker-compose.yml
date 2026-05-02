@@ -1,4 +1,4 @@
-# Project Workspace + Agent — Docker Compose Setup
+# Hermes Workspace + Agent — Docker Compose Setup
 #
 # Requirements:
 #   - Docker & Docker Compose
@@ -14,14 +14,14 @@
 #
 # Images:
 #   This file pulls pre-built images by default — no local build required.
-#     - nousresearch/hermes-agent:latest  (Project Agent, Dockerfile upstream)
+#     - nousresearch/hermes-agent:latest  (Hermes Agent, Dockerfile upstream)
 #     - ghcr.io/outsourc-e/hermes-workspace:latest  (this workspace)
 #
 #   To build from source instead (e.g. for development), use:
 #     docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 #
 # Persistent data:
-#   The `hermes-data` named volume mounts at /opt/data inside the agent
+#   The `claude-data` named volume mounts at /opt/data inside the agent
 #   container. Config, sessions, skills, memory, and credentials live there
 #   and survive container recreation. For host-path mounts see the commented
 #   `volumes:` block on the hermes-agent service.
@@ -32,7 +32,7 @@
 #   - Agent must expose port 8642
 
 services:
-  # The Hermes AI Agent Gateway
+  # The Claude AI Agent Gateway
   # Provides the backend API that the workspace connects to
   hermes-agent:
     image: nousresearch/hermes-agent:latest
@@ -41,7 +41,7 @@ services:
     environment:
       # Pass through whichever provider keys are set in .env. hermes-agent
       # uses the one that matches the provider configured in
-      # ~/.hermes/config.yaml (or whatever `hermes setup` picked).
+      # ~/.hermes/config.yaml (or whatever `claude setup` picked).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -65,7 +65,7 @@ services:
       # Persist agent state across container recreation. Swap for a
       # host-path mount (e.g. `./data:/opt/data`) if you want to edit
       # config/skills directly from the host.
-      - hermes-data:/opt/data
+      - claude-data:/opt/data
     healthcheck:
       test: ['CMD-SHELL', 'curl -fsS http://localhost:8642/health || exit 1']
       interval: 10s
@@ -75,7 +75,7 @@ services:
     ports:
       - '8642:8642'
 
-  # The Project Workspace Web UI
+  # The Hermes Workspace Web UI
   # Connects to hermes-agent at http://hermes-agent:8642
   hermes-workspace:
     image: ghcr.io/outsourc-e/hermes-workspace:latest
@@ -92,7 +92,7 @@ services:
       # Workspace session password. REQUIRED when HOST is non-loopback (the
       # default for Docker images, so the container binds 0.0.0.0:3000).
       # Pick a strong secret. See #122.
-      HERMES_PASSWORD: ${HERMES_PASSWORD:-}
+      CLAUDE_PASSWORD: ${CLAUDE_PASSWORD:-}
       # Enable the Secure flag on session cookies when terminated behind
       # HTTPS (reverse proxy / Tailscale Funnel / Cloudflare Tunnel). See #123.
       COOKIE_SECURE: ${COOKIE_SECURE:-}
@@ -105,4 +105,4 @@ services:
       - '127.0.0.1:3000:3000'
 
 volumes:
-  hermes-data:
+  claude-data:

@@ -493,7 +493,7 @@ export function UsageDetailsModal({
                     chatting.
                   </div>
                   <div className="mt-1 text-xs text-primary-500">
-                    Open Settings -{'>'} Providers to connect Claude CLI or add
+                    Open Settings -{'>'} Providers to connect Hermes CLI or add
                     an API key.
                   </div>
                 </div>

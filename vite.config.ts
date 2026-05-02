@@ -19,16 +19,16 @@ import viteTsConfigPaths from 'vite-tsconfig-paths'
 // ---------------------------------------------------------------------------
 
 /** Resolve the hermes-agent directory using a priority-ordered fallback chain:
- *  1. HERMES_AGENT_PATH env var (explicit override)
+ *  1. CLAUDE_AGENT_PATH env var (explicit override)
  *  2. ../hermes-agent  — sibling clone (standard README setup)
  *  3. ../../hermes-agent — one level up (monorepo / nested workspace)
  *  Returns null if none found.
  */
-function resolveHermesAgentDir(env: Record<string, string>): string | null {
+function resolveClaudeAgentDir(env: Record<string, string>): string | null {
   const candidates: string[] = []
 
-  if (env.HERMES_AGENT_PATH?.trim()) {
-    candidates.push(env.HERMES_AGENT_PATH.trim())
+  if (env.CLAUDE_AGENT_PATH?.trim()) {
+    candidates.push(env.CLAUDE_AGENT_PATH.trim())
   }
 
   // Resolve relative to the workspace root (parent of hermes-workspace/)
@@ -36,7 +36,7 @@ function resolveHermesAgentDir(env: Record<string, string>): string | null {
   candidates.push(
     resolve(workspaceRoot, 'hermes-agent'),            // sibling (old README)
     resolve(workspaceRoot, '..', 'hermes-agent'),      // one level up
-    resolve(os.homedir(), '.hermes', 'hermes-agent'),  // Nous installer default
+    resolve(os.homedir(), '.claude', 'hermes-agent'),  // Nous installer default
     resolve(os.homedir(), 'hermes-agent'),             // ~/hermes-agent
   )
 
@@ -46,11 +46,11 @@ function resolveHermesAgentDir(env: Record<string, string>): string | null {
   return null
 }
 
-/** Find the `hermes` CLI binary installed by Nous's installer. */
-function resolveHermesBinary(): string | null {
+/** Find the `claude` CLI binary installed by Nous's installer. */
+function resolveClaudeBinary(): string | null {
   const candidates = [
-    resolve(os.homedir(), '.hermes', 'bin', 'hermes'),
-    resolve(os.homedir(), '.local', 'bin', 'hermes'),
+    resolve(os.homedir(), '.claude', 'bin', 'claude'),
+    resolve(os.homedir(), '.local', 'bin', 'claude'),
   ]
   for (const c of candidates) {
     if (existsSync(c)) return c
@@ -61,7 +61,7 @@ function resolveHermesBinary(): string | null {
 /** Resolve the Python executable to use for Hermes backend startup.
  *  Prefers .venv/bin/python inside agentDir, falls back to system python3.
  */
-function resolveHermesPython(agentDir: string): string {
+function resolveClaudePython(agentDir: string): string {
   const venvPython = resolve(agentDir, '.venv', 'bin', 'python')
   if (existsSync(venvPython)) return venvPython
   // uv creates 'venv' not '.venv' sometimes
@@ -71,7 +71,7 @@ function resolveHermesPython(agentDir: string): string {
 }
 
 /** Check if hermes-agent health endpoint is responding */
-async function isHermesAgentHealthy(port = 8642): Promise<boolean> {
+async function isClaudeAgentHealthy(port = 8642): Promise<boolean> {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: AbortSignal.timeout(2000),
@@ -84,17 +84,17 @@ async function isHermesAgentHealthy(port = 8642): Promise<boolean> {
 
 const config = defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const hermesApiUrl = env.HERMES_API_URL?.trim() || 'http://127.0.0.1:8642'
+  const claudeApiUrl = env.CLAUDE_API_URL?.trim() || 'http://127.0.0.1:8642'
 
   // Hermes Agent auto-start state
-  let hermesAgentChild: ChildProcess | null = null
-  let hermesAgentStarted = false
+  let claudeAgentChild: ChildProcess | null = null
+  let claudeAgentStarted = false
 
-  const startHermesAgent = async () => {
-    if (hermesAgentStarted) return
-    // Skip auto-start when HERMES_API_URL is explicitly set to a non-local endpoint
+  const startClaudeAgent = async () => {
+    if (claudeAgentStarted) return
+    // Skip auto-start when CLAUDE_API_URL is explicitly set to a non-local endpoint
     const explicitUrl =
-      env.HERMES_API_URL || process.env.HERMES_API_URL || hermesApiUrl || ''
+      env.CLAUDE_API_URL || process.env.CLAUDE_API_URL || claudeApiUrl || ''
     if (
       explicitUrl &&
       explicitUrl !== 'http://127.0.0.1:8642' &&
@@ -103,17 +103,17 @@ const config = defineConfig(({ mode, command }) => {
       console.log(
         `[hermes-agent] Skipping auto-start — using external API: ${explicitUrl}`,
       )
-      hermesAgentStarted = true
+      claudeAgentStarted = true
       return
     }
-    if (await isHermesAgentHealthy()) {
+    if (await isClaudeAgentHealthy()) {
       console.log('[hermes-agent] Already running — reusing existing process')
-      hermesAgentStarted = true
+      claudeAgentStarted = true
       return
     }
 
-    const hermesBin = resolveHermesBinary()
-    const agentDir = resolveHermesAgentDir(env)
+    const claudeBin = resolveClaudeBinary()
+    const agentDir = resolveClaudeAgentDir(env)
 
     // Prefer the `hermes gateway run` binary path (Nous installer's canonical
     // entrypoint). Fall back to launching uvicorn against the source tree if
@@ -122,13 +122,13 @@ const config = defineConfig(({ mode, command }) => {
     let commandArgs: string[]
     let launchCwd: string | undefined
 
-    if (hermesBin) {
-      launchCmd = hermesBin
+    if (claudeBin) {
+      launchCmd = claudeBin
       commandArgs = ['gateway', 'run']
       launchCwd = agentDir ?? undefined
-      console.log(`[hermes-agent] Starting ${hermesBin} gateway run`)
+      console.log(`[hermes-agent] Starting ${claudeBin} gateway run`)
     } else if (agentDir) {
-      launchCmd = resolveHermesPython(agentDir)
+      launchCmd = resolveClaudePython(agentDir)
       const useGatewayRun = existsSync(resolve(agentDir, 'gateway', 'run.py'))
       commandArgs = useGatewayRun
         ? ['-m', 'gateway.run']
@@ -142,7 +142,7 @@ const config = defineConfig(({ mode, command }) => {
         '[hermes-agent] Could not find hermes-agent installation.\n' +
           '  Run the installer:\n' +
           '    curl -fsSL https://hermes-workspace.com/install.sh | bash\n' +
-          '  Or set HERMES_AGENT_PATH in .env to point at your hermes-agent clone.',
+          '  Or set CLAUDE_AGENT_PATH in .env to point at your hermes-agent clone.',
       )
       return
     }
@@ -157,7 +157,7 @@ const config = defineConfig(({ mode, command }) => {
         env: {
           ...process.env,
           PATH: [
-            resolve(os.homedir(), '.hermes', 'bin'),
+            resolve(os.homedir(), '.claude', 'bin'),
             resolve(os.homedir(), '.local', 'bin'),
             agentDir ? resolve(agentDir, '.venv', 'bin') : '',
             agentDir ? resolve(agentDir, 'venv', 'bin') : '',
@@ -169,8 +169,8 @@ const config = defineConfig(({ mode, command }) => {
       },
     )
 
-    hermesAgentChild = child
-    hermesAgentStarted = true
+    claudeAgentChild = child
+    claudeAgentStarted = true
 
     child.stdout?.on('data', (d: Buffer) => {
       const line = d.toString().trim()
@@ -182,8 +182,8 @@ const config = defineConfig(({ mode, command }) => {
     })
 
     child.on('exit', (code) => {
-      hermesAgentChild = null
-      hermesAgentStarted = false
+      claudeAgentChild = null
+      claudeAgentStarted = false
       if (code !== 0 && code !== null) {
         console.warn(`[hermes-agent] Exited with code ${code}`)
       }
@@ -192,7 +192,7 @@ const config = defineConfig(({ mode, command }) => {
     // Wait for healthy
     for (let i = 0; i < 15; i++) {
       await new Promise((r) => setTimeout(r, 1000))
-      if (await isHermesAgentHealthy()) {
+      if (await isClaudeAgentHealthy()) {
         console.log('[hermes-agent] ✓ Ready on http://127.0.0.1:8642')
         return
       }
@@ -393,17 +393,17 @@ const config = defineConfig(({ mode, command }) => {
   }
 
   // Allow access from Tailscale, LAN, or custom domains via env var
-  // e.g. HERMES_ALLOWED_HOSTS=my-server.tail1234.ts.net,192.168.1.50
-  const _allowedHosts: string[] | true = env.HERMES_ALLOWED_HOSTS?.trim()
+  // e.g. CLAUDE_ALLOWED_HOSTS=my-server.tail1234.ts.net,192.168.1.50
+  const _allowedHosts: string[] | true = env.CLAUDE_ALLOWED_HOSTS?.trim()
     ? env
-        .HERMES_ALLOWED_HOSTS!.split(',')
+        .CLAUDE_ALLOWED_HOSTS!.split(',')
         .map((h) => h.trim())
         .filter(Boolean)
     : ['.ts.net'] // allow all Tailscale hostnames by default
   let proxyTarget = 'http://127.0.0.1:18789'
 
   try {
-    const parsed = new URL(hermesApiUrl)
+    const parsed = new URL(claudeApiUrl)
     parsed.protocol = parsed.protocol === 'wss:' ? 'https:' : 'http:'
     parsed.pathname = ''
     proxyTarget = parsed.toString().replace(/\/$/, '')
@@ -412,6 +412,14 @@ const config = defineConfig(({ mode, command }) => {
   }
 
   return {
+    test: {
+      exclude: [
+        '**/node_modules/**',
+        '**/dist/**',
+        '**/skills-bundle/**',
+        '**/.{idea,git,cache,output,temp}/**',
+      ],
+    },
     define: {
       // Note: Do NOT set 'process.env': {} here — TanStack Start uses environment-based
       // builds where isSsrBuild is unreliable. Blanket process.env replacement breaks
@@ -449,31 +457,26 @@ const config = defineConfig(({ mode, command }) => {
       port: process.env.PORT ? Number(process.env.PORT) : 3000,
       strictPort: false, // allow fallback if port is taken, but log clearly
       allowedHosts: true,
-      watch: {
-        // Exclude generated route tree — TanStack Router's file watcher
-        // detects its own output as a change → infinite regeneration loop
-        ignored: ['**/routeTree.gen.ts'],
-      },
       proxy: {
-        // WebSocket proxy: clients connect to /ws-hermes on the Hermes Workspace
+        // WebSocket proxy: clients connect to /ws-claude on the Hermes Workspace
         // server (any IP/port), which internally forwards to the local server.
         // This means phone/LAN/Docker users never need to reach port 18789 directly.
-        '/ws-hermes': {
+        '/ws-claude': {
           target: proxyTarget,
           changeOrigin: false,
           ws: true,
-          rewrite: (path) => path.replace(/^\/ws-hermes/, ''),
+          rewrite: (path) => path.replace(/^\/ws-claude/, ''),
         },
 // REST API proxy: API proxy for Hermes backend
-        '/api/hermes-proxy': {
+        '/api/claude-proxy': {
           target: proxyTarget,
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/hermes-proxy/, ''),
+          rewrite: (path) => path.replace(/^\/api\/claude-proxy/, ''),
         },
-        '/hermes-ui': {
+        '/claude-ui': {
           target: proxyTarget,
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/hermes-ui/, ''),
+          rewrite: (path) => path.replace(/^\/claude-ui/, ''),
           ws: true,
           configure: (proxy) => {
             proxy.on('proxyRes', (_proxyRes) => {
@@ -520,12 +523,12 @@ const config = defineConfig(({ mode, command }) => {
               requestPath === '/api/connection-status'
             ) {
               try {
-                // Check for enhanced Hermes gateway first (has /api/sessions)
+                // Check for enhanced Hermes Agent gateway first (has /api/sessions)
                 const [modelsRes, sessionsRes] = await Promise.all([
-                  fetch(`${hermesApiUrl}/v1/models`, {
+                  fetch(`${claudeApiUrl}/v1/models`, {
                     signal: AbortSignal.timeout(3000),
                   }).catch(() => null),
-                  fetch(`${hermesApiUrl}/api/sessions?limit=1`, {
+                  fetch(`${claudeApiUrl}/api/sessions?limit=1`, {
                     signal: AbortSignal.timeout(3000),
                   }).catch(() => null),
                 ])
@@ -538,7 +541,7 @@ const config = defineConfig(({ mode, command }) => {
                     JSON.stringify({
                       ok: true,
                       mode: 'enhanced',
-                      backend: hermesApiUrl,
+                      backend: claudeApiUrl,
                     }),
                   )
                   return
@@ -550,13 +553,13 @@ const config = defineConfig(({ mode, command }) => {
                     JSON.stringify({
                       ok: true,
                       mode: 'portable',
-                      backend: hermesApiUrl,
+                      backend: claudeApiUrl,
                     }),
                   )
                   return
                 }
                 // Fall back to /health for full Hermes backends
-                const healthRes = await fetch(`${hermesApiUrl}/health`, {
+                const healthRes = await fetch(`${claudeApiUrl}/health`, {
                   signal: AbortSignal.timeout(3000),
                 })
                 res.statusCode = healthRes.ok ? 200 : 502
@@ -565,7 +568,7 @@ const config = defineConfig(({ mode, command }) => {
                   JSON.stringify({
                     ok: healthRes.ok,
                     mode: 'enhanced',
-                    backend: hermesApiUrl,
+                    backend: claudeApiUrl,
                   }),
                 )
               } catch {
@@ -575,7 +578,7 @@ const config = defineConfig(({ mode, command }) => {
                   JSON.stringify({
                     ok: false,
                     mode: 'disconnected',
-                    backend: hermesApiUrl,
+                    backend: claudeApiUrl,
                   }),
                 )
               }
@@ -607,6 +610,23 @@ const config = defineConfig(({ mode, command }) => {
             }
           })
 
+          // Dev-only: disable Node's default 5-minute request timeout so
+          // long-running SSE streams (agent runs that go silent for minutes
+          // during heavy reasoning / tool calls) don't get killed mid-stream
+          // by the HTTP layer. Heartbeats handle keep-alive at the application
+          // layer. Production servers should keep their default timeouts to
+          // avoid slowloris exposure.
+          if (command === 'serve' && server.httpServer) {
+            const httpServer = server.httpServer as unknown as {
+              requestTimeout?: number
+              headersTimeout?: number
+              timeout?: number
+            }
+            httpServer.requestTimeout = 0
+            httpServer.headersTimeout = 0
+            httpServer.timeout = 0
+          }
+
           server.httpServer?.on('close', () => {
             workspaceDaemonShuttingDown = true
             workspaceDaemonStarted = false
@@ -619,16 +639,16 @@ const config = defineConfig(({ mode, command }) => {
 
           // Auto-start hermes-agent when dev server launches
           if (command === 'serve') {
-            void startHermesAgent()
+            void startClaudeAgent()
           }
 
           // Shutdown hermes-agent when dev server stops
           server.httpServer?.on('close', () => {
-            if (hermesAgentChild) {
+            if (claudeAgentChild) {
               console.log('[hermes-agent] Stopping...')
-              hermesAgentChild.kill('SIGTERM')
-              hermesAgentChild = null
-              hermesAgentStarted = false
+              claudeAgentChild.kill('SIGTERM')
+              claudeAgentChild = null
+              claudeAgentStarted = false
             }
           })
 
@@ -685,12 +705,12 @@ const config = defineConfig(({ mode, command }) => {
           // Replace specific env vars first, then the generic fallback
           let result = code
           result = result.replace(
-            /process\.env\.HERMES_API_URL/g,
-            JSON.stringify(hermesApiUrl),
+            /process\.env\.CLAUDE_API_URL/g,
+            JSON.stringify(claudeApiUrl),
           )
           result = result.replace(
-            /process\.env\.HERMES_API_TOKEN/g,
-            JSON.stringify(env.HERMES_API_TOKEN || ''),
+            /process\.env\.CLAUDE_API_TOKEN/g,
+            JSON.stringify(env.CLAUDE_API_TOKEN || ''),
           )
           result = result.replace(
             /process\.env\.NODE_ENV/g,

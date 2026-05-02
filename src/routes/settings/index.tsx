@@ -111,56 +111,56 @@ const THEME_PREVIEWS: Record<
   ThemeId,
   { bg: string; panel: string; border: string; accent: string; text: string }
 > = {
-  'hermes-nous': {
+  'claude-nous': {
     bg: '#031a1a',
     panel: '#082224',
     border: 'rgba(255,255,255,0.12)',
     accent: '#ffac02',
     text: '#f8f1e3',
   },
-  'hermes-nous-light': {
+  'claude-nous-light': {
     bg: '#F8FAF8',
     panel: '#FBFDFB',
     border: 'rgba(30,74,92,0.18)',
     accent: '#2557B7',
     text: '#16315F',
   },
-  'hermes-official': {
+  'claude-official': {
     bg: '#0A0E1A',
     panel: '#11182A',
     border: '#24304A',
     accent: '#6366F1',
     text: '#E6EAF2',
   },
-  'hermes-official-light': {
+  'claude-official-light': {
     bg: '#F7F7F1',
     panel: '#FAFBF6',
     border: '#CDD5DA',
     accent: '#2557B7',
     text: '#16315F',
   },
-  'hermes-classic': {
+  'claude-classic': {
     bg: '#0d0f12',
     panel: '#1a1f26',
     border: '#2a313b',
     accent: '#b98a44',
     text: '#eceff4',
   },
-  'hermes-slate': {
+  'claude-slate': {
     bg: '#0d1117',
     panel: '#1c2128',
     border: '#30363d',
     accent: '#7eb8f6',
     text: '#c9d1d9',
   },
-  'hermes-classic-light': {
+  'claude-classic-light': {
     bg: '#F5F2ED',
     panel: '#FFFFFF',
     border: '#D9D0C4',
     accent: '#b98a44',
     text: '#1a1f26',
   },
-  'hermes-slate-light': {
+  'claude-slate-light': {
     bg: '#F6F8FA',
     panel: '#FFFFFF',
     border: '#D0D7DE',
@@ -302,7 +302,7 @@ function SettingsRoute() {
   }, [])
 
   const { section } = Route.useSearch()
-  const activeSection: SettingsSectionId = section ?? 'hermes'
+  const activeSection: SettingsSectionId = section ?? 'claude'
 
   return (
     <div className="min-h-screen bg-surface text-primary-900">
@@ -320,20 +320,20 @@ function SettingsRoute() {
           {activeSection === 'connection' && <ConnectionSection />}
 
           {/* ── Hermes Agent ──────────────────────────────────── */}
-          {activeSection === 'hermes' && (
-            <HermesConfigSection activeView="hermes" />
+          {activeSection === 'claude' && (
+            <ClaudeConfigSection activeView="claude" />
           )}
           {activeSection === 'agent' && (
-            <HermesConfigSection activeView="agent" />
+            <ClaudeConfigSection activeView="agent" />
           )}
           {activeSection === 'routing' && (
-            <HermesConfigSection activeView="routing" />
+            <ClaudeConfigSection activeView="routing" />
           )}
           {activeSection === 'voice' && (
-            <HermesConfigSection activeView="voice" />
+            <ClaudeConfigSection activeView="voice" />
           )}
           {activeSection === 'display' && (
-            <HermesConfigSection activeView="display" />
+            <ClaudeConfigSection activeView="display" />
           )}
 
           {/* ── Appearance ──────────────────────────────────────── */}
@@ -855,7 +855,7 @@ type LoaderStyleOption = { value: LoaderStyle; label: string }
 
 const LOADER_STYLES: Array<LoaderStyleOption> = [
   { value: 'dots', label: 'Dots' },
-  { value: 'braille-hermes', label: 'Hermes' },
+  { value: 'braille-claude', label: 'Claude' },
   { value: 'braille-orbit', label: 'Orbit' },
   { value: 'braille-breathe', label: 'Breathe' },
   { value: 'braille-pulse', label: 'Pulse' },
@@ -866,7 +866,7 @@ const LOADER_STYLES: Array<LoaderStyleOption> = [
 
 function getPreset(style: LoaderStyle): BrailleSpinnerPreset | null {
   const map: Record<string, BrailleSpinnerPreset> = {
-    'braille-hermes': 'hermes',
+    'braille-claude': 'claude',
     'braille-orbit': 'orbit',
     'braille-breathe': 'breathe',
     'braille-pulse': 'pulse',
@@ -935,7 +935,7 @@ function _LoaderStyleSection() {
 
 // ── Hermes Agent Configuration ──────────────────────────────────────
 
-type HermesProvider = {
+type ClaudeProvider = {
   id: string
   name: string
   authType: string
@@ -944,15 +944,15 @@ type HermesProvider = {
   maskedKeys: Record<string, string>
 }
 
-type HermesConfigData = {
+type ClaudeConfigData = {
   config: Record<string, unknown>
-  providers: Array<HermesProvider>
+  providers: Array<ClaudeProvider>
   activeProvider: string
   activeModel: string
-  hermesHome: string
+  claudeHome: string
 }
 
-const HERMES_API = process.env.HERMES_API_URL || 'http://127.0.0.1:8642'
+const CLAUDE_API = process.env.HERMES_API_URL || process.env.CLAUDE_API_URL || 'http://127.0.0.1:8642'
 
 type AvailableModelsResponse = {
   provider: string
@@ -960,12 +960,12 @@ type AvailableModelsResponse = {
   providers: Array<{ id: string; label: string; authenticated: boolean }>
 }
 
-function HermesConfigSection({
-  activeView = 'hermes',
+function ClaudeConfigSection({
+  activeView = 'claude',
 }: {
-  activeView?: 'hermes' | 'agent' | 'routing' | 'voice' | 'display'
+  activeView?: 'claude' | 'agent' | 'routing' | 'voice' | 'display'
 }) {
-  const [data, setData] = useState<HermesConfigData | null>(null)
+  const [data, setData] = useState<ClaudeConfigData | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
@@ -983,15 +983,15 @@ function HermesConfigSection({
   >([])
   const [loadingModels, setLoadingModels] = useState(false)
 
-  const syncInputsFromData = useCallback((configData: HermesConfigData) => {
+  const syncInputsFromData = useCallback((configData: ClaudeConfigData) => {
     setModelInput(configData.activeModel || '')
     setProviderInput(configData.activeProvider || '')
     setBaseUrlInput((configData.config?.base_url as string) || '')
   }, [])
 
   const fetchConfig = useCallback(async () => {
-    const res = await fetch('/api/hermes-config')
-    const configData = (await res.json()) as HermesConfigData
+    const res = await fetch('/api/claude-config')
+    const configData = (await res.json()) as ClaudeConfigData
     setData(configData)
     syncInputsFromData(configData)
     return configData
@@ -1005,7 +1005,7 @@ function HermesConfigSection({
     setLoadingModels(true)
     try {
       const res = await fetch(
-        `/api/hermes-proxy/api/available-models?provider=${encodeURIComponent(provider)}`,
+        `/api/claude-proxy/api/available-models?provider=${encodeURIComponent(provider)}`,
       )
       if (res.ok) {
         const result = (await res.json()) as AvailableModelsResponse
@@ -1036,7 +1036,7 @@ function HermesConfigSection({
     setSaving(true)
     setSaveMessage(null)
     try {
-      const res = await fetch('/api/hermes-config', {
+      const res = await fetch('/api/claude-config', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -1128,7 +1128,7 @@ function HermesConfigSection({
   const sttProvider = (sttConfig.provider as string) || 'local'
   const sttLocal = (sttConfig.local as Record<string, unknown>) || {}
 
-  const renderHermesOverview = () => (
+  const renderClaudeOverview = () => (
     <>
       <SettingsSection
         title="Model & Provider"
@@ -1172,7 +1172,7 @@ function HermesConfigSection({
         </SettingsRow>
         <SettingsRow
           label="Model"
-          description="The model Hermes uses for conversations."
+          description="The model Claude uses for conversations."
         >
           <div className="flex w-full max-w-sm gap-2">
             {availableModels.length > 0 ? (
@@ -1431,7 +1431,7 @@ function HermesConfigSection({
               size="sm"
               variant="outline"
               onClick={() =>
-                void navigator.clipboard?.writeText(data.hermesHome)
+                void navigator.clipboard?.writeText(data.claudeHome)
               }
             >
               Copy config path
@@ -1447,13 +1447,13 @@ function HermesConfigSection({
       >
         <SettingsRow
           label="Config location"
-          description="Where Hermes stores its configuration."
+          description="Where Claude stores its configuration."
         >
           <span
             className="text-xs font-mono"
             style={{ color: 'var(--theme-muted)' }}
           >
-            {data.hermesHome}
+            {data.claudeHome}
           </span>
         </SettingsRow>
         <SettingsRow
@@ -1848,7 +1848,7 @@ function HermesConfigSection({
   )
 
   const sectionContent = {
-    hermes: renderHermesOverview(),
+    claude: renderClaudeOverview(),
     agent: renderAgentBehavior(),
     routing: renderSmartRouting(),
     voice: renderVoice(),
@@ -1970,7 +1970,7 @@ function ConnectionSection() {
   return (
     <SettingsSection
       title="Connection"
-      description="Point the workspace at your Project Agent services. Useful for Tailscale, LAN, or remote-server setups (#101)."
+      description="Point the workspace at your Hermes Agent services. Useful for Tailscale, LAN, or remote-server setups (#101)."
       icon={Link01Icon}
     >
       <div className="text-xs text-primary-600">
