@@ -1,7 +1,7 @@
-import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Component,  useEffect, useMemo, useRef, useState } from 'react'
 import { PlaygroundActionBar } from './components/playground-actionbar'
 import { PlaygroundAdminPanel } from './components/playground-admin-panel'
-import { PlaygroundChat, type ChatMessage } from './components/playground-chat'
+import {  PlaygroundChat } from './components/playground-chat'
 import { PlaygroundCustomizer } from './components/playground-customizer'
 import { PlaygroundDialog } from './components/playground-dialog'
 import { PlaygroundHeroCanvas } from './components/playground-hero-canvas'
@@ -11,11 +11,20 @@ import { PlaygroundMap } from './components/playground-map'
 import { PlaygroundMinimap } from './components/playground-minimap'
 import { PlaygroundSidePanel } from './components/playground-sidepanel'
 import { PlaygroundWorld3D } from './components/playground-world-3d'
+import { Toast } from './components/toast'
+import { FpsCounter } from './components/fps-counter'
+import { KeyboardShortcutsOverlay } from './components/keyboard-shortcuts-overlay'
+import { PhotosensitiveWarningSplash } from './components/photosensitive-warning-splash'
+import { SettingsPanel } from './components/settings-panel'
+import { useHermesWorldSettings } from './components/hermesworld-settings'
 import { usePlaygroundRpg } from './hooks/use-playground-rpg'
 import { playgroundAudio, usePlaygroundAudioMuted } from './lib/playground-audio'
-import { autoNarrateWorld, cancelNarration, isNarrationMuted, setNarrationMuted, narrateWorldNow } from './lib/playground-narration'
+import { autoNarrateWorld, cancelNarration, isNarrationMuted, narrateWorldNow, setNarrationMuted } from './lib/playground-narration'
 import { botsFor } from './lib/playground-bots'
-import { itemById, PLAYGROUND_WORLDS, type PlaygroundItemId, type PlaygroundWorldId } from './lib/playground-rpg'
+import { PLAYGROUND_WORLDS,   itemById } from './lib/playground-rpg'
+import type {ChatMessage} from './components/playground-chat';
+import type {ReactNode} from 'react';
+import type {PlaygroundItemId, PlaygroundWorldId} from './lib/playground-rpg';
 import type { RemotePlayer } from './hooks/use-playground-multiplayer'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 
@@ -59,14 +68,17 @@ class PlaygroundErrorBoundary extends Component<
 export function PlaygroundScreen() {
   const rpg = usePlaygroundRpg()
   const audioMuted = usePlaygroundAudioMuted()
+  const [settings] = useHermesWorldSettings()
   const [launched, setLaunched] = useState(false)
   const [world, setWorld] = useState<PlaygroundWorldId>(rpg.state.playerProfile.lastZone)
   const [dialogNpc, setDialogNpc] = useState<string | null>(null)
   const [nearbyNpc, setNearbyNpc] = useState<string | null>(null)
   const [journalOpen, setJournalOpen] = useState(false)
   const [customizerOpen, setCustomizerOpen] = useState(false)
-  const [chatCollapsed, setChatCollapsed] = useState(false)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [onboardingHintOpen, setOnboardingHintOpen] = useState(false)
+  const [chatCollapsed, setChatCollapsed] = useState(true)
+  const [messages, setMessages] = useState<Array<ChatMessage>>([])
   const [botBubbles, setBotBubbles] = useState<Record<string, string>>({})
   const [mapOpen, setMapOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
@@ -150,8 +162,8 @@ export function PlaygroundScreen() {
   }, [rpg.state.playerProfile.lastZone])
 
   useEffect(() => {
-    rpg.setLastZone(world)
-  }, [rpg, world])
+    if (rpg.state.playerProfile.lastZone !== world) rpg.setLastZone(world)
+  }, [rpg, rpg.state.playerProfile.lastZone, world])
 
   useEffect(() => {
     if (!monsterDefeated) setMonsterHp(monsterHpMax)
@@ -177,6 +189,16 @@ export function PlaygroundScreen() {
       setObjectivePulseKey((value) => value + 1)
     }
   }, [activeQuest?.id, currentObjective?.id])
+
+  useEffect(() => {
+    if (activeQuest?.id === 'training-q1' && rpg.state.playerProfile.questProgress['training-q1'].completedObjectives.length > 0 && !rpg.state.completedQuests.includes('training-q1')) {
+      setOnboardingHintOpen(true)
+      const id = window.setTimeout(() => setOnboardingHintOpen(false), 8000)
+      const onJump = () => setOnboardingHintOpen(false)
+      window.addEventListener('hermesworld-player-jumped', onJump, { once: true })
+      return () => { window.clearTimeout(id); window.removeEventListener('hermesworld-player-jumped', onJump) }
+    }
+  }, [activeQuest?.id, rpg.state.playerProfile.questProgress, rpg.state.completedQuests])
 
   useEffect(() => {
     for (const toast of rpg.toasts) {
@@ -271,7 +293,12 @@ export function PlaygroundScreen() {
       if (key === 'j') setJournalOpen((value) => !value)
       if (key === 'c') setCustomizerOpen((value) => !value)
       if (key === 'm') setMapOpen((value) => !value)
+      if (key === 'i') setMobileMenuOpen((value) => !value)
+      if (key === 'n') setMobileMenuOpen((value) => !value)
+      if (key === 'k') setMobileMenuOpen((value) => !value)
       if (key === 'e' && nearbyNpc && !dialogNpc) setDialogNpc(nearbyNpc)
+      if (key === 'Enter') setChatCollapsed(false)
+      if (key === '/') setChatCollapsed(false)
       if (key === 't') setChatCollapsed(false)
       if (key === 'f') setFocusMode((value) => !value)
       // Auto-engage focus mode on first movement so the world isn't blocked by panels
@@ -281,6 +308,9 @@ export function PlaygroundScreen() {
         setFocusMode(true)
       }
       if (event.key === 'Escape') {
+        const closingAny = journalOpen || !!dialogNpc || mapOpen || archiveOpen || tutorialCompleteOpen || settingsOpen
+        if (!closingAny) { setSettingsOpen(true); return }
+        setSettingsOpen(false)
         setJournalOpen(false)
         setDialogNpc(null)
         setMapOpen(false)
@@ -292,7 +322,7 @@ export function PlaygroundScreen() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dialogNpc, nearbyNpc])
+  }, [archiveOpen, dialogNpc, journalOpen, mapOpen, nearbyNpc, settingsOpen, tutorialCompleteOpen])
 
   const equippedVisuals = useMemo(() => {
     const weapon = rpg.state.playerProfile.equipped.weapon ? itemById(rpg.state.playerProfile.equipped.weapon) : null
@@ -392,14 +422,14 @@ export function PlaygroundScreen() {
       case 'strike':
         return attackMonster(10 + Math.floor(Math.random() * 4))
       case 'dash':
-        if (!rpg.useMp(8)) return false
+        rpg.useMp(8)
         window.dispatchEvent(new CustomEvent('hermes-playground-dash'))
         return true
       case 'bolt':
-        if (!rpg.useMp(15)) return false
+        rpg.useMp(15)
         return attackMonster(18 + Math.floor(Math.random() * 6), false)
       case 'summon':
-        if (!rpg.useMp(20)) return false
+        rpg.useMp(20)
         // Spawn a 60-second familiar via custom event — the world component listens.
         window.dispatchEvent(
           new CustomEvent('hermes-playground-summon-familiar', {
@@ -435,7 +465,7 @@ export function PlaygroundScreen() {
       void enterForgeFromTraining()
       return
     }
-    const order: PlaygroundWorldId[] = ['training', 'forge', 'agora', 'grove', 'oracle', 'arena']
+    const order: Array<PlaygroundWorldId> = ['training', 'forge', 'agora', 'grove', 'oracle', 'arena']
     const unlocked = order.filter((id) => rpg.state.unlockedWorlds.includes(id))
     const currentIndex = unlocked.indexOf(world)
     const next = unlocked[(currentIndex + 1) % unlocked.length] ?? world
@@ -605,6 +635,18 @@ export function PlaygroundScreen() {
           worldName={WORLD_META[world].name}
           worldAccent={WORLD_META[world].accent}
         />
+        <PlaygroundRightRail
+          focusMode={focusMode}
+          adminMode={adminMode}
+          accent={WORLD_META[world].accent}
+          onToggleFocus={() => setFocusMode((value) => !value)}
+          onOpenInventory={rpg.openInventory}
+          onOpenJournal={() => setJournalOpen(true)}
+          onOpenMap={() => setMapOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onToggleAdmin={toggleAdminMode}
+        />
+        <FpsCounter enabled={settings.performance.fpsCounter} />
         <PlaygroundHud
           state={rpg.state}
           activeQuestTitle={activeQuest?.title ?? 'Training Complete'}
@@ -646,39 +688,6 @@ export function PlaygroundScreen() {
             onOpenChange={setMobileMenuOpen}
           />
         )}
-        {/* Focus mode toggle — eyeball icon (sits in the gap between minimap and quest tracker) */}
-        <button
-          type="button"
-          onClick={() => setFocusMode((v) => !v)}
-          aria-label={focusMode ? 'Exit focus mode (F or Esc)' : 'Focus mode — hide side rail (F)'}
-          title={focusMode ? 'Exit focus mode (F or Esc)' : 'Focus mode — hide side rail (F)'}
-          className="pointer-events-auto fixed right-3 top-[230px] z-[71] hidden h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/70 text-[16px] text-white shadow-xl backdrop-blur-xl md:flex"
-          style={{
-            boxShadow: focusMode ? `0 0 14px ${WORLD_META[world].accent}88` : '0 8px 22px rgba(0,0,0,.55)',
-            borderColor: focusMode ? WORLD_META[world].accent : 'rgba(255,255,255,0.15)',
-          }}
-        >
-          <span aria-hidden="true" style={{ filter: focusMode ? 'none' : 'grayscale(0.4)' }}>
-            {focusMode ? '👁️' : '👁'}
-          </span>
-        </button>
-        {/* Admin mode toggle — shield icon, persistent via localStorage */}
-        <button
-          type="button"
-          onClick={toggleAdminMode}
-          aria-label={adminMode ? 'Hide admin panel' : 'Show admin panel'}
-          title={adminMode ? 'Hide admin panel' : 'Show admin panel'}
-          className="pointer-events-auto fixed right-3 top-[272px] z-[71] hidden h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/70 text-[15px] text-white shadow-xl backdrop-blur-xl md:flex"
-          style={{
-            boxShadow: adminMode ? '0 0 14px rgba(251,191,36,0.55)' : '0 8px 22px rgba(0,0,0,.55)',
-            borderColor: adminMode ? 'rgba(251,191,36,0.6)' : 'rgba(255,255,255,0.15)',
-          }}
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            {adminMode ? <path d="m9 12 2 2 4-4" /> : null}
-          </svg>
-        </button>
         <button
           type="button"
           onClick={() => setMobileMenuOpen(true)}
@@ -686,6 +695,11 @@ export function PlaygroundScreen() {
           >
           Menu
         </button>
+        <KeyboardShortcutsOverlay />
+        <MobileAbilityControls />
+        <OnboardingHintCard open={onboardingHintOpen} />
+        <PhotosensitiveWarningSplash onOpenSettings={() => setSettingsOpen(true)} />
+        <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} signedInName={rpg.state.playerProfile.displayName || null} />
         <PlaygroundHelpHud worldName={WORLD_META[world].name} />
         {adminMode ? <PlaygroundAdminPanel /> : null}
         <PlaygroundUtilityDock
@@ -726,6 +740,116 @@ export function PlaygroundScreen() {
         <TransitionLoadingScreen active={transitioning} worldName={WORLD_META[world].name} />
       </div>
     </PlaygroundErrorBoundary>
+  )
+}
+
+
+type PlaygroundRightRailProps = {
+  focusMode: boolean
+  adminMode: boolean
+  accent: string
+  onToggleFocus: () => void
+  onOpenInventory: () => void
+  onOpenJournal: () => void
+  onOpenMap: () => void
+  onOpenSettings: () => void
+  onToggleAdmin: () => void
+}
+
+function PlaygroundRightRail({
+  focusMode,
+  adminMode,
+  accent,
+  onToggleFocus,
+  onOpenInventory,
+  onOpenJournal,
+  onOpenMap,
+  onOpenSettings,
+  onToggleAdmin,
+}: PlaygroundRightRailProps) {
+  const hudAccent = accent === '#d9b35f' ? '#F1C56D' : accent
+  const railItems: Array<{ label: string; glyph: string; onClick: () => void; active?: boolean }> = [
+    { label: focusMode ? 'Exit focus' : 'Sigil focus', glyph: '☤', onClick: onToggleFocus, active: focusMode },
+    { label: 'Inventory', glyph: '▣', onClick: onOpenInventory },
+    { label: 'Quest scroll', glyph: '?', onClick: onOpenJournal },
+    { label: 'Map', glyph: '◇', onClick: onOpenMap },
+    { label: 'Settings', glyph: '⚙', onClick: onOpenSettings },
+    { label: adminMode ? 'Hide admin' : 'Admin shield', glyph: '⌂', onClick: onToggleAdmin, active: adminMode },
+  ]
+  return (
+    <div
+      className="pointer-events-auto fixed right-[20px] top-[214px] z-[72] hidden flex-col items-center gap-2 rounded-[24px] border px-2 py-3 text-[#F4E9D3] shadow-2xl backdrop-blur-xl md:flex"
+      style={{
+        borderColor: `${hudAccent}66`,
+        background: 'linear-gradient(180deg, rgba(15,22,34,.9), rgba(10,13,18,.84)), radial-gradient(circle at 50% 0%, rgba(241,197,109,.2), transparent 62%)',
+        boxShadow: `0 18px 42px rgba(0,0,0,.62), 0 0 24px ${hudAccent}2e, inset 0 1px 0 rgba(244,233,211,.12)`,
+      }}
+    >
+      {railItems.map((item) => (
+        <button
+          key={item.label}
+          type="button"
+          onClick={item.onClick}
+          aria-label={item.label}
+          title={item.label}
+          className="relative flex h-11 w-11 items-center justify-center rounded-[15px] border text-[18px] font-black transition hover:-translate-x-0.5 hover:scale-105"
+          style={{
+            borderColor: item.active ? hudAccent : 'rgba(184,134,43,.4)',
+            color: item.active ? '#0A0D12' : hudAccent,
+            background: item.active ? 'linear-gradient(180deg, #F1C56D, #B8862B)' : 'linear-gradient(180deg, rgba(27,36,51,.72), rgba(10,13,18,.78))',
+            boxShadow: item.active ? `0 0 18px ${hudAccent}66` : 'inset 0 1px 0 rgba(244,233,211,.1)',
+          }}
+        >
+          {item.glyph}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function MobileAbilityControls() {
+  const [crouching, setCrouching] = useState(false)
+  const emitCrouch = (active: boolean) => {
+    setCrouching(active)
+    try { window.dispatchEvent(new CustomEvent('hermesworld-mobile-crouch', { detail: { active } })) } catch {}
+  }
+  const jump = () => {
+    try { window.dispatchEvent(new CustomEvent('hermesworld-mobile-jump')) } catch {}
+  }
+  return (
+    <>
+      <button
+        type="button"
+        onClick={jump}
+        className="pointer-events-auto fixed bottom-[138px] right-4 z-[74] h-14 w-14 rounded-full border-2 border-amber-200/40 bg-black/72 text-[11px] font-black uppercase tracking-[0.12em] text-amber-100 shadow-2xl backdrop-blur-xl md:hidden"
+      >
+        Jump
+      </button>
+      <button
+        type="button"
+        onClick={() => emitCrouch(!crouching)}
+        className="pointer-events-auto fixed bottom-[104px] left-4 z-[74] rounded-full border border-white/15 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.14em] text-white shadow-xl backdrop-blur-xl md:hidden"
+        style={{ background: crouching ? 'rgba(241,197,109,.24)' : 'rgba(0,0,0,.68)', borderColor: crouching ? 'rgba(241,197,109,.55)' : 'rgba(255,255,255,.15)' }}
+      >
+        {crouching ? 'Crouch on' : 'Crouch'}
+      </button>
+    </>
+  )
+}
+
+function OnboardingHintCard({ open }: { open: boolean }) {
+  if (!open) return null
+  return (
+    <div className="pointer-events-none fixed left-1/2 top-[108px] z-[92] w-[min(92vw,420px)] -translate-x-1/2 rounded-2xl border border-amber-200/35 bg-black/76 p-3 text-white shadow-2xl backdrop-blur-xl">
+      <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-amber-200/70">Training hint</div>
+      <div className="mt-1 text-sm font-black text-[#F1C56D]">Move • Talk • Jump • Crouch</div>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-white/72">
+        <span><kbd className="text-amber-100">WASD</kbd> Move</span>
+        <span><kbd className="text-amber-100">E</kbd> Talk</span>
+        <span><kbd className="text-amber-100">Space</kbd> Jump</span>
+        <span><kbd className="text-amber-100">Ctrl</kbd> Crouch</span>
+      </div>
+    </div>
   )
 }
 
@@ -787,20 +911,17 @@ function TitleScreen({
               Hermes Agent Realm
               <span className="opacity-60">· Nous Research × Kimi</span>
             </div>
-            <h1
-              className="text-[88px] leading-none font-black tracking-tight"
+            <img
+              src="/assets/hermesworld/art/hermesworld-logo-horizontal.svg"
+              alt="HermesWorld"
+              width={760}
+              height={228}
+              className="mt-2 w-[min(760px,82vw)] max-w-full"
               style={{
-                background: 'linear-gradient(180deg, #ffffff 0%, #f5d97a 50%, #c89c2a 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
-                textShadow: '0 0 40px rgba(245,217,122,0.35)',
-                fontFamily: 'Cinzel, "Trajan Pro", "Cormorant Garamond", "Playfair Display", Georgia, serif',
-                letterSpacing: '0.04em',
+                filter:
+                  'drop-shadow(0 12px 34px rgba(2,7,11,0.62)) drop-shadow(0 0 34px rgba(245,217,122,0.22))',
               }}
-            >
-              HermesWorld
-            </h1>
+            />
             {/* ASCII signature — distinctive, hand-crafted feel */}
             <pre
               className="mt-3 hidden text-[8px] leading-[1.05] md:block"
@@ -1068,7 +1189,7 @@ function ForgeArrivalOverlay({
   )
 }
 
-function NearbyBuildersChip({ players }: { players: RemotePlayer[] }) {
+function NearbyBuildersChip({ players }: { players: Array<RemotePlayer> }) {
   const [pingedId, setPingedId] = useState<string | null>(null)
   const sidebarCollapsed = useWorkspaceStore((s) => s.sidebarCollapsed)
   const chromeLeft = sidebarCollapsed ? 'min(120px, 9vw)' : '320px'
@@ -1144,12 +1265,10 @@ function CameraPresetToast() {
   }, [])
   if (!name) return null
   return (
-    <div
-      className="pointer-events-none fixed left-1/2 top-[88px] z-[85] -translate-x-1/2 rounded-full border-2 border-white/30 bg-black/85 px-5 py-2 text-[12px] font-bold uppercase tracking-[0.2em] text-amber-200 backdrop-blur-xl"
-      style={{ boxShadow: '0 0 22px rgba(250, 204, 21, 0.45)', animation: 'hermes-toast-in 200ms ease-out' }}
-    >
-      🎬 {name}
-      <style>{`@keyframes hermes-toast-in { from { opacity: 0; transform: translate(-50%, -10px); } to { opacity: 1; transform: translate(-50%, 0); } }`}</style>
+    <div className="pointer-events-none fixed left-1/2 top-[88px] z-[85] w-[min(86vw,360px)] -translate-x-1/2">
+      <Toast title="Camera preset" rarity="common" icon="🎬">
+        {name}
+      </Toast>
     </div>
   )
 }
@@ -1278,7 +1397,7 @@ function PlaygroundUtilityDock({
     const canvas = document.querySelector('canvas')
     if (!canvas) return
     try {
-      const dataUrl = (canvas as HTMLCanvasElement).toDataURL('image/png')
+      const dataUrl = (canvas).toDataURL('image/png')
       const a = document.createElement('a')
       a.href = dataUrl
       a.download = `hermesworld-${new Date().toISOString().replace(/[:.]/g, '-')}.png`
